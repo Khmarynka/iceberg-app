@@ -1,0 +1,16 @@
+{
+  "name": "IcebergView",
+  "short_name": "IcebergView",
+  "description": "Холодний погляд на твої гроші. Дані лише в телефоні.",
+  "lang": "uk",
+  "start_url": "./",
+  "scope": "./",
+  "display": "standalone",
+  "background_color": "#0e1a26",
+  "theme_color": "#0e1a26",
+  "icons": [
+    {"src": "icons/icon-192.png", "sizes": "192x192", "type": "image/png"},
+    {"src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png"},
+    {"src": "icons/icon-512.png", "sizes": "512x512", "type": "image/png", "purpose": "maskable"}
+  ]
+}

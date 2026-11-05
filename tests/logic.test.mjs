@@ -74,7 +74,7 @@ test('totals exclude own transfers', () => {
 });
 
 test('own money, debt, jars, main card, names', () => {
-  assert.deepEqual(ownMoney(INFO), { own: 30000, debt: 750000, limit: 2000000, jars: 500000 });
+  assert.deepEqual(ownMoney(INFO), { own: 30000, debt: 750000, limit: 2000000, jars: 500000, others: 0 });
   assert.equal(mainAccount(INFO).id, 'black');
   assert.equal(cardName(INFO.accounts[0]), 'Чорна •1234');
   assert.equal(category(9999), 'Інше');
@@ -83,4 +83,28 @@ test('own money, debt, jars, main card, names', () => {
 test('ops sorted newest first', () => {
   const ops = toOps(ITEMS, INFO);
   assert.ok(ops[0].time > ops.at(-1).time);
+});
+
+test('kopecks and excluded (child) card', () => {
+  assert.equal(money(1129, 980, { kop: true }), '11,29 грн');
+  assert.equal(money(-123456, 980, { kop: true }), '−1 234,56 грн');
+  const info = { accounts: [
+    { id: 'black', currencyCode: 980, balance: 1129, creditLimit: 2000000 },
+    { id: 'kid', currencyCode: 980, balance: 3163, creditLimit: 0 },
+  ], jars: [] };
+  assert.equal(ownMoney(info).own, 3163);                    // без позначки — дитяча рахується
+  const m = ownMoney(info, ['kid']);
+  assert.equal(m.own, 0);
+  assert.equal(m.others, 3163);
+  assert.equal(m.debt, 2000000 - 1129);
+});
+
+test('main card skips child card even if listed first', () => {
+  const info = { accounts: [
+    { id: 'kid', currencyCode: 980, type: 'black', balance: 3163, creditLimit: 0 },
+    { id: 'mine', currencyCode: 980, type: 'black', balance: 1129, creditLimit: 2000000 },
+  ] };
+  assert.equal(mainAccount(info).id, 'mine');            // чорна з лімітом — пріоритет
+  assert.equal(mainAccount(info, ['mine']).id, 'kid');
+  assert.equal(mainAccount({ accounts: [info.accounts[0]] }, ['kid']), null);
 });

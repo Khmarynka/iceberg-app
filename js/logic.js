@@ -5,9 +5,10 @@ export const KYIV = 'Europe/Kyiv';
 
 export const CURRENCY = { 980: 'грн', 840: '$', 978: '€' };
 
-export function money(minor, currency = 980, { sign = false } = {}) {
-  const v = Math.abs(minor) / 100;
-  const s = Math.round(v).toString().replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
+export function money(minor, currency = 980, { sign = false, kop = false } = {}) {
+  const abs = Math.abs(Math.round(minor));
+  let s = (kop ? Math.floor(abs / 100) : Math.round(abs / 100)).toString().replace(/\B(?=(\d{3})+(?!\d))/g, '\u00a0');
+  if (kop) s += ',' + String(abs % 100).padStart(2, '0');
   const pre = minor < 0 ? '−' : (sign && minor > 0 ? '+' : '');
   return `${pre}${s} ${CURRENCY[currency] ?? ''}`.trim();
 }
@@ -121,23 +122,26 @@ export function totals(ops) {
   return t;
 }
 
-/** Свої гроші на гривневих картках, борг за кредиткою, ліміт, у банках — копійки. */
-export function ownMoney(info) {
-  let own = 0, debt = 0, limit = 0, jars = 0;
+/** Свої гроші на гривневих картках, борг за кредиткою, ліміт, у банках — копійки.
+ *  notMine — id карток, які не рахуються (напр., дитяча картка). */
+export function ownMoney(info, notMine = []) {
+  let own = 0, debt = 0, limit = 0, jars = 0, others = 0;
   for (const a of info.accounts || []) {
     if (a.currencyCode !== 980) continue;
+    if (notMine.includes(a.id)) { others += Math.max(0, (+a.balance || 0) - (+a.creditLimit || 0)); continue; }
     const bal = +a.balance || 0, lim = +a.creditLimit || 0;
     limit += lim;
     const diff = bal - lim;
     if (diff >= 0) own += diff; else debt -= diff;
   }
   for (const j of info.jars || []) if (j.currencyCode === 980) jars += +j.balance || 0;
-  return { own, debt, limit, jars };
+  return { own, debt, limit, jars, others };
 }
 
-export function mainAccount(info) {
-  const uah = (info.accounts || []).filter(a => a.currencyCode === 980);
-  return uah.find(a => a.type === 'black') || uah[0] || null;
+/** Основна гривнева картка: без «не моїх», спершу чорна з кредитним лімітом, потім будь-яка чорна, потім інша. */
+export function mainAccount(info, notMine = []) {
+  const uah = (info.accounts || []).filter(a => a.currencyCode === 980 && !notMine.includes(a.id));
+  return uah.find(a => a.type === 'black' && +a.creditLimit > 0) || uah.find(a => a.type === 'black') || uah[0] || null;
 }
 
 const KIND_NAMES = { black: 'Чорна', white: 'Біла', platinum: 'Платинова', iron: 'Залізна', fop: 'ФОП',

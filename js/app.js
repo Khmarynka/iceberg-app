@@ -7,12 +7,12 @@ import {
   mainAccount, cardName, CURRENCY,
 } from './logic.js';
 
-export const VERSION = '0.1.0';
+export const VERSION = '0.1.1';
 const CACHE_FRESH_MS = 60 * 60 * 1000;   // дані вважаються свіжими 60 хв
 const AUTOLOCK_MS = 5 * 60 * 1000;       // блокування після 5 хв у фоні
 
 const app = document.getElementById('app');
-const S = { vault: null, token: null, cache: null, tab: 'overview', filter: 'all', open: null, status: null, busy: false };
+const S = { vault: null, token: null, cache: null, prefs: { notMine: [] }, tab: 'overview', filter: 'all', open: null, status: null, busy: false };
 
 // ---------------------------------------------------------------- DOM без innerHTML (захист від XSS)
 function h(tag, attrs = {}, ...kids) {
@@ -44,7 +44,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 function lock() {
-  Object.assign(S, { vault: null, token: null, cache: null, open: null, status: null });
+  Object.assign(S, { vault: null, token: null, cache: null, prefs: { notMine: [] }, open: null, status: null, tab: 'overview', filter: 'all' });
   viewUnlock();
 }
 
@@ -91,6 +91,7 @@ async function viewUnlock() {
     S.vault = v;
     S.token = await v.get('token');
     S.cache = await v.get('cache');
+    S.prefs = Object.assign({ notMine: [] }, await v.get('prefs'));
     S.token ? afterUnlock() : viewToken();
   };
   mount(h('form', { class: 'wrap center', onsubmit: go },
@@ -150,6 +151,8 @@ function needsRefresh() {
   const c = S.cache;
   if (!c || !c.fetchedAt) return true;
   if (Date.now() - c.fetchedAt > CACHE_FRESH_MS) return true;
+  const main = mainAccount(c.info || {}, S.prefs.notMine);
+  if (main && c.account && main.id !== c.account) return true;
   return c.monthStart !== monthStartUnix(Date.now());
 }
 
@@ -167,7 +170,7 @@ async function refresh() {
   try {
     setStatus('Беру дані з monobank…');
     const info = await mono.clientInfo(S.token, onWait);
-    const acc = mainAccount(info);
+    const acc = mainAccount(info, S.prefs.notMine);
     const now = Date.now();
     const from = monthStartUnix(now);
     const items = acc ? await mono.statement(S.token, acc.id, from, Math.floor(now / 1000), onWait) : [];
@@ -234,16 +237,18 @@ function viewOverview() {
   const title = MONTHS[now.month - 1][0].toUpperCase() + MONTHS[now.month - 1].slice(1);
   if (!c || !c.info) return h('div', { class: 'kv' }, header(title), h('p', { class: 'muted' }, 'Дані ще завантажуються.'));
   const t = totals(monthOps());
-  const m = ownMoney(c.info);
+  const m = ownMoney(c.info, S.prefs.notMine);
   const scale = Math.max(t.income, t.out, 1);
 
   const have = h('section', { class: 'card' },
     h('h2', {}, 'Що в мене є зараз'),
-    h('div', {}, h('div', { class: 'big num' }, money(m.own)), h('p', { class: 'muted small' }, 'своїх грошей на гривневих картках')),
+    h('div', {}, h('div', { class: 'big num' }, money(m.own, 980, { kop: true })), h('p', { class: 'muted small' }, 'своїх грошей на твоїх гривневих картках (без кредитного ліміту)')),
     h('div', { class: 'kv' },
       m.limit ? h('div', { class: 'row' }, h('span', {}, 'Борг за кредиткою'),
-        h('span', { class: 'num ' + (m.debt ? 'c-out' : 'c-in') }, m.debt ? `${money(m.debt)} з ${money(m.limit)}` : 'немає')) : null,
-      m.jars ? h('div', { class: 'row' }, h('span', {}, 'У банках (накопичення)'), h('span', { class: 'num' }, money(m.jars))) : null));
+        h('span', { class: 'num ' + (m.debt ? 'c-out' : 'c-in') }, m.debt ? `${money(m.debt, 980, { kop: true })} з ${money(m.limit)}` : 'немає')) : null,
+      m.jars ? h('div', { class: 'row' }, h('span', {}, 'У банках (накопичення)'), h('span', { class: 'num' }, money(m.jars, 980, { kop: true }))) : null,
+      m.others ? h('div', { class: 'row muted' }, h('span', {}, 'На картках, позначених «не мої»'), h('span', { class: 'num' }, money(m.others, 980, { kop: true }))) : null),
+    h('p', { class: 'muted small' }, 'Чужу картку (напр., дитячу) познач у «Рахунках» — тоді вона не рахуватиметься.'));
 
   const flow = h('section', { class: 'card' },
     h('h2', {}, `Рух грошей з 1 ${MONTHS_GEN[now.month - 1]}`),
@@ -281,7 +286,10 @@ function viewOverview() {
       'Тоді тут буде головне: скільки ще прийде, скільки ще треба сплатити і скільки вільно.'));
 
   return h('div', { class: 'kv' }, header(title), have, flow, where, soon,
-    h('p', { class: 'muted small' }, 'Рух — за основною гривневою карткою monobank.'));
+    h('p', { class: 'muted small' }, (() => {
+      const a = mainAccount(c.info, S.prefs.notMine);
+      return `Рух — за карткою ${a ? cardName(a) : 'monobank'}. Перекази на інші свої картки не рахуються.`;
+    })()));
 }
 
 function catRow(name, v, max, cls) {
@@ -356,25 +364,42 @@ function viewAccounts() {
     const cur = a.currencyCode, bal = +a.balance || 0, lim = +a.creditLimit || 0;
     const name = `${cardName(a)} · ${CURRENCY[cur] || cur}`;
     if (!bal && !lim) { empty.push(name); continue; }
+    const mine = !S.prefs.notMine.includes(a.id);
     const lines = [];
+    const k = { kop: true };
     if (lim) {
       const diff = bal - lim;
-      lines.push(h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Кредитний ліміт'), h('span', { class: 'num' }, money(lim, cur))));
+      lines.push(h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Кредитний ліміт'), h('span', { class: 'num' }, money(lim, cur, k))));
       lines.push(diff >= 0
-        ? h('div', { class: 'row' }, h('span', {}, 'Своїх грошей'), h('b', { class: 'num c-in' }, money(diff, cur)))
-        : h('div', { class: 'row' }, h('span', {}, 'Борг за кредиткою'), h('b', { class: 'num c-out' }, money(-diff, cur))));
-      lines.push(h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Можна витратити разом із лімітом'), h('span', { class: 'num' }, money(bal, cur))));
+        ? h('div', { class: 'row' }, h('span', {}, 'Своїх грошей'), h('b', { class: 'num c-in' }, money(diff, cur, k)))
+        : h('div', { class: 'row' }, h('span', {}, 'Борг за кредиткою'), h('b', { class: 'num c-out' }, money(-diff, cur, k))));
+      lines.push(h('div', { class: 'row' }, h('span', { class: 'muted' }, 'Можна витратити разом із лімітом'), h('span', { class: 'num' }, money(bal, cur, k))));
     } else {
-      lines.push(h('div', { class: 'row' }, h('span', {}, 'Баланс'), h('b', { class: 'num' }, money(bal, cur))));
+      lines.push(h('div', { class: 'row' }, h('span', {}, 'Баланс'), h('b', { class: 'num' }, money(bal, cur, k))));
     }
-    full.push(h('div', { class: 'acc' }, h('b', {}, name), lines));
+    if (cur === 980) {
+      lines.push(h('button', {
+        class: 'btn ghost small', type: 'button', 'aria-pressed': String(!mine),
+        onclick: async () => {
+          const set = new Set(S.prefs.notMine);
+          mine ? set.add(a.id) : set.delete(a.id);
+          S.prefs.notMine = [...set];
+          await S.vault.set('prefs', S.prefs);
+          render();
+          const main = mainAccount(S.cache.info, S.prefs.notMine);
+          if (main && main.id !== S.cache.account) refresh();   // виписка мала бути з іншої картки
+        },
+      }, mine ? 'Це не моя картка (напр., дитяча)' : '↩ Рахувати як мою'));
+    }
+    full.push(h('div', { class: 'acc' + (mine ? '' : ' notmine') },
+      h('div', { class: 'row' }, h('b', {}, name), mine ? null : h('span', { class: 'small muted' }, 'не рахується')), lines));
   }
   const jarsFull = [], jarsEmpty = [];
   for (const j of info.jars || []) {
     const cur = j.currencyCode, bal = +j.balance || 0, goal = +j.goal || 0;
     if (!bal) { jarsEmpty.push(`${j.title}${goal ? ` · ціль ${money(goal, cur)}` : ''}`); continue; }
     jarsFull.push(h('div', { class: 'acc' },
-      h('div', { class: 'row' }, h('b', {}, j.title), h('span', { class: 'num' }, money(bal, cur))),
+      h('div', { class: 'row' }, h('b', {}, j.title), h('span', { class: 'num' }, money(bal, cur, { kop: true }))),
       goal ? [h('div', { class: 'prog' }, h('i', { style: { width: `${Math.min(100, (100 * bal) / goal)}%` } })),
         h('p', { class: 'muted small' }, `${Math.round((100 * bal) / goal)}% з ${money(goal, cur)}`)] : null));
   }

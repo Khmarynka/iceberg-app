@@ -3,17 +3,18 @@
 import { Vault, pinDelay, pinFailed, pinOk } from './vault.js';
 import * as mono from './mono.js';
 import * as P from './plan.js';
+import { prepareImage, scanImage, ScanError } from './scan.js';
 import {
   money, monthStartUnix, kyivDate, MONTHS, MONTHS_GEN, category, totals, ownMoney,
   cardName, CURRENCY, allOps, statementAccounts,
 } from './logic.js';
 
-export const VERSION = '0.2.0';
+export const VERSION = '0.2.1';
 const CACHE_FRESH_MS = 60 * 60 * 1000;   // дані вважаються свіжими 60 хв
 const AUTOLOCK_MS = 5 * 60 * 1000;       // блокування після 5 хв у фоні
 
 const app = document.getElementById('app');
-const S = { vault: null, token: null, cache: null, prefs: { notMine: [] }, plan: P.emptyPlan(), cal: null, day: null, edit: null, tab: 'overview', filter: 'all', open: null, status: null, busy: false };
+const S = { vault: null, token: null, cache: null, prefs: { notMine: [] }, plan: P.emptyPlan(), cal: null, day: null, edit: null, aikey: null, queue: [], tab: 'overview', filter: 'all', open: null, status: null, busy: false };
 
 // ---------------------------------------------------------------- DOM без innerHTML (захист від XSS)
 function h(tag, attrs = {}, ...kids) {
@@ -45,7 +46,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 function lock() {
-  Object.assign(S, { vault: null, token: null, cache: null, prefs: { notMine: [] }, plan: P.emptyPlan(), cal: null, day: null, edit: null, open: null, status: null, tab: 'overview', filter: 'all' });
+  Object.assign(S, { vault: null, token: null, cache: null, prefs: { notMine: [] }, plan: P.emptyPlan(), cal: null, day: null, edit: null, aikey: null, queue: [], open: null, status: null, tab: 'overview', filter: 'all' });
   viewUnlock();
 }
 
@@ -94,6 +95,7 @@ async function viewUnlock() {
     S.cache = await v.get('cache');
     S.prefs = Object.assign({ notMine: [] }, await v.get('prefs'));
     S.plan = Object.assign(P.emptyPlan(), await v.get('plan'));
+    S.aikey = await v.get('aikey');
     S.token ? afterUnlock() : viewToken();
   };
   mount(h('form', { class: 'wrap center', onsubmit: go },
@@ -455,6 +457,7 @@ function viewSettings() {
     h('form', { class: 'card', onsubmit: changePin },
       h('h2', {}, 'Змінити PIN'), pinInput('np1', 'Новий PIN'), pinInput('np2', 'Ще раз'), msg,
       h('button', { class: 'btn ghost', type: 'submit' }, 'Змінити PIN')),
+    aiCard(),
     h('section', { class: 'card' },
       h('h2', {}, 'monobank'),
       h('button', { class: 'btn ghost', type: 'button', onclick: viewToken }, 'Замінити токен'),
@@ -463,6 +466,66 @@ function viewSettings() {
       h('button', { class: 'btn ghost', type: 'button', onclick: lock }, 'Заблокувати зараз'),
       h('button', { class: 'btn danger', type: 'button', onclick: viewWipe }, 'Стерти все з цього телефона')),
     h('p', { class: 'muted small' }, `IcebergView ${VERSION}`));
+}
+
+function aiCard() {
+  const msg = h('p', { class: 'err', role: 'alert' });
+  if (S.aikey) {
+    return h('section', { class: 'card' },
+      h('h2', {}, 'Розпізнавання скрінів (Claude API)'),
+      h('p', { class: 'small' }, '✅ Ключ збережено (зашифровано PIN). Кнопка «📷 Зі скріну» — у «Плані».'),
+      h('p', { class: 'small muted' }, 'Скрін на час розпізнавання передається в Anthropic, у телефоні не зберігається. ',
+        'Ключ можна відкликати на console.anthropic.com.'),
+      h('button', { class: 'btn ghost', type: 'button', onclick: async () => { await S.vault.del('aikey'); S.aikey = null; render(); } },
+        'Вимкнути й видалити ключ'));
+  }
+  const save = async (e) => {
+    e.preventDefault();
+    const k = document.getElementById('aik').value.trim();
+    if (!/^sk-ant-[\w-]{20,}$/.test(k)) return (msg.textContent = 'Це не схоже на ключ Claude API (має починатися з sk-ant-).');
+    await S.vault.set('aikey', k);
+    S.aikey = k;
+    document.getElementById('aik').value = '';
+    render();
+  };
+  return h('form', { class: 'card', onsubmit: save },
+    h('h2', {}, 'Розпізнавання скрінів (Claude API)'),
+    h('p', { class: 'small muted' }, 'Вимкнено. Щоб додавати розстрочки зі скрінів, встав ключ із console.anthropic.com. ',
+      'Він зашифрується PIN і зберігатиметься лише в цьому телефоні. Скрін на час розпізнавання передається в Anthropic.'),
+    h('label', { for: 'aik' }, 'Ключ Claude API',
+      h('input', { id: 'aik', type: 'password', autocomplete: 'off', autocapitalize: 'off', spellcheck: 'false' })),
+    msg, h('button', { class: 'btn', type: 'submit' }, 'Зберегти ключ'));
+}
+
+// ---------------------------------------------------------------- скрін → чернетки
+async function onScanFile(file) {
+  if (!file) return;
+  if (!S.aikey) { S.tab = 'settings'; S.edit = null; render(); return; }
+  setStatus('Готую скрін…');
+  try {
+    const b64 = await prepareImage(file);
+    setStatus('Розпізнаю скрін (≈10–20 с)…');
+    const t = todayK();
+    let drafts = await scanImage(S.aikey, b64, dateStr(t.y, t.m, t.d));
+    setStatus(null);
+    if (!drafts.length) { setStatus('На скріні не знайшов розстрочок чи платежів. Спробуй інший скрін або «+ Додати» вручну.', true); return; }
+    drafts = drafts.map(d => {
+      if (!d.count && d.debt && d.payment) d.count = Math.ceil(d.debt / d.payment);   // залишок / платіж
+      return d;
+    });
+    S.queue = drafts.slice(1);
+    S.edit = { kind: 'obligations', item: null, draft: drafts[0], n: 1, of: drafts.length };
+    render(); window.scrollTo(0, 0);
+  } catch (x) {
+    setStatus(x instanceof ScanError ? x.message : 'Не вдалося розпізнати скрін. Спробуй ще раз або введи вручну.', true);
+  }
+}
+
+function nextDraft() {
+  const d = S.queue.shift();
+  if (d) { S.edit = { kind: 'obligations', item: null, draft: d, n: S.edit.n + 1, of: S.edit.of }; }
+  else { S.edit = null; S.tab = 'plan'; }
+  render(); window.scrollTo(0, 0);
 }
 
 // ---------------------------------------------------------------- План: вільно, календар, зобовʼязання
@@ -601,12 +664,21 @@ function eventRow(e, canMark) {
     }, e.st.state === 'done' ? 'Скасувати' : (e.type === 'in' ? 'Надійшло' : 'Сплачено')) : null);
 }
 
+function scanButton() {
+  const input = h('input', { type: 'file', accept: 'image/*', class: 'visually-hidden', id: 'scanfile',
+    onchange: (e) => { const f = e.target.files[0]; e.target.value = ''; onScanFile(f); } });
+  return h('label', { class: 'btn small ghost filebtn', for: 'scanfile', title: S.aikey ? 'Розпізнати скрін' : 'Спершу додай ключ у «Ще»' },
+    '📷 Зі скріну', input);
+}
+
 function itemsCard(title, kind, hint) {
   const t = todayK(), ops = monthOps();
   const items = S.plan[kind];
   return h('section', { class: 'card' },
     h('div', { class: 'row' }, h('h2', {}, title),
-      h('button', { class: 'btn small', type: 'button', onclick: () => { S.edit = { kind, item: null }; render(); window.scrollTo(0, 0); } }, '+ Додати')),
+      h('div', { class: 'btns' },
+        kind === 'obligations' ? scanButton() : null,
+        h('button', { class: 'btn small', type: 'button', onclick: () => { S.edit = { kind, item: null }; render(); window.scrollTo(0, 0); } }, '+ Додати'))),
     !items.length ? h('p', { class: 'muted small' }, hint) : null,
     items.map(it => {
       const amount = kind === 'obligations' ? it.payment : it.amount;
@@ -632,9 +704,9 @@ function nextDate(it, t) {
 
 // ---------------------------------------------------------------- форма
 function viewEdit() {
-  const { kind, item } = S.edit;
+  const { kind, item, draft } = S.edit;
   const ob = kind === 'obligations';
-  const it = item || {};
+  const it = item || draft || {};
   const err = h('p', { class: 'err', role: 'alert' });
   const field = (id, label, attrs = {}, hint) => h('label', { for: id }, label,
     h('input', { id, autocomplete: 'off', ...attrs }), hint ? h('small', { class: 'muted' }, hint) : null);
@@ -667,6 +739,7 @@ function viewEdit() {
     const i = list.findIndex(x => x.id === rec.id);
     if (i >= 0) list[i] = rec; else list.push(rec);
     await savePlan();
+    if (draft) return nextDraft();
     S.edit = null; S.tab = 'plan'; render();
   };
   const del = async () => {
@@ -689,8 +762,10 @@ function viewEdit() {
   if (ob && regular && item) { leftWrap.hidden = true; costWrap.hidden = true; }
 
   return h('form', { class: 'kv', onsubmit: save },
-    h('div', { class: 'top' }, h('h1', {}, item ? 'Змінити' : (ob ? 'Нове зобовʼязання' : 'Новий дохід')),
-      h('button', { class: 'btn ghost small', type: 'button', onclick: () => { S.edit = null; render(); } }, 'Скасувати')),
+    h('div', { class: 'top' }, h('h1', {}, item ? 'Змінити' : draft ? `Перевір дані зі скріну${S.edit.of > 1 ? ` (${S.edit.n} з ${S.edit.of})` : ''}` : (ob ? 'Нове зобовʼязання' : 'Новий дохід')),
+      h('button', { class: 'btn ghost small', type: 'button', onclick: () => { if (draft) return nextDraft(); S.edit = null; render(); } }, draft ? 'Пропустити' : 'Скасувати')),
+    draft ? h('div', { class: 'note' }, h('b', {}, 'Розпізнано ШІ — перевір кожне поле. '),
+      'Порожнє — на скріні не знайшлося, допиши сам.', draft.note ? h('div', {}, `На скріні про ставку: «${draft.note}»`) : null) : null,
     h('section', { class: 'card' },
       field('f-name', 'Назва', { type: 'text', value: it.name || '', placeholder: ob ? 'Розстрочка Comfy, комуналка…' : 'Зарплата Philips…' }),
       field('f-bank', 'Банк або звідки', { type: 'text', value: it.bank || '', list: 'banks', placeholder: 'monobank, ПУМБ, Raiffeisen…' }),

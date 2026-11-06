@@ -87,7 +87,7 @@ export class Vault {
 
   /** Новий PIN: перешифрувати всі записи. */
   async changePin(newPin) {
-    const names = ['token', 'cache', 'plan', 'prefs'];
+    const names = ['token', 'cache', 'plan', 'prefs', 'aikey'];
     const data = {};
     for (const n of names) data[n] = await this.get(n);
     const v = await Vault.create(newPin);

@@ -225,3 +225,9 @@ label small { font-size: 12.5px; }
 .note div { margin-top: 6px; color: var(--ink); }
 
 .k-refund .ic { background: var(--own-soft); color: var(--in); } .k-refund .a { color: var(--in); }
+
+/* ---------- 0.2.3: бренд на екрані входу ---------- */
+.brand { display: grid; justify-items: center; gap: 4px; margin-bottom: 8px; text-align: center; }
+.hero-img { width: min(56vw, 240px); height: auto; aspect-ratio: 1; border-radius: 22%; box-shadow: 0 12px 40px rgba(0, 60, 160, 0.35); }
+.brand-name { font-size: 30px; font-weight: 800; letter-spacing: -0.02em; margin-top: 14px; }
+.brand-tag { font-size: 15px; color: var(--accent); letter-spacing: 0.12em; text-transform: uppercase; font-weight: 600; }

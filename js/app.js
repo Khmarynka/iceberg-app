@@ -9,7 +9,7 @@ import {
   cardName, CURRENCY, allOps, statementAccounts,
 } from './logic.js';
 
-export const VERSION = '0.2.2';
+export const VERSION = '0.2.3';
 const CACHE_FRESH_MS = 60 * 60 * 1000;   // дані вважаються свіжими 60 хв
 const AUTOLOCK_MS = 5 * 60 * 1000;       // блокування після 5 хв у фоні
 
@@ -50,6 +50,13 @@ function lock() {
   viewUnlock();
 }
 
+function brand() {
+  return h('div', { class: 'brand' },
+    h('img', { class: 'hero-img', src: 'icons/hero-480.jpg', alt: '', width: '240', height: '240' }),
+    h('div', { class: 'brand-name' }, 'IcebergView'),
+    h('div', { class: 'brand-tag' }, 'Дивись глибше'));
+}
+
 function pinInput(id, label) {
   return h('label', { for: id }, label,
     h('input', { id, type: 'password', inputmode: 'numeric', autocomplete: 'off', pattern: '[0-9]*', maxlength: '12' }));
@@ -68,8 +75,7 @@ function viewCreatePin() {
   };
   const btn = h('button', { class: 'btn', type: 'submit' }, 'Створити PIN');
   mount(h('form', { class: 'wrap center', onsubmit: go },
-    h('img', { class: 'logo', src: 'icons/icon-192.png', alt: '' }),
-    h('h1', {}, 'IcebergView'),
+    brand(),
     h('p', { class: 'muted' }, 'Холодний погляд на твої гроші. Дані живуть лише в цьому телефоні.'),
     h('div', { class: 'note' }, h('b', {}, 'Придумай PIN '), '(6–12 цифр). Ним шифруються токен банку й дані. ',
       'Його ніде не збережено: якщо забудеш — доведеться стерти все й підключити банк заново.'),
@@ -99,8 +105,7 @@ async function viewUnlock() {
     S.token ? afterUnlock() : viewToken();
   };
   mount(h('form', { class: 'wrap center', onsubmit: go },
-    h('img', { class: 'logo', src: 'icons/icon-192.png', alt: '' }),
-    h('h1', {}, 'IcebergView'),
+    brand(),
     pinInput('pin', 'PIN-код'), err, btn,
     h('button', { class: 'btn ghost small', type: 'button', onclick: viewWipe }, 'Забув PIN')));
   document.getElementById('pin').focus();

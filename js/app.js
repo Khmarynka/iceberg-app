@@ -2,17 +2,18 @@
 // запити йдуть прямо до monobank. Серверів-посередників немає.
 import { Vault, pinDelay, pinFailed, pinOk } from './vault.js';
 import * as mono from './mono.js';
+import * as P from './plan.js';
 import {
   money, monthStartUnix, kyivDate, MONTHS, MONTHS_GEN, category, totals, ownMoney,
   cardName, CURRENCY, allOps, statementAccounts,
 } from './logic.js';
 
-export const VERSION = '0.1.2';
+export const VERSION = '0.2.0';
 const CACHE_FRESH_MS = 60 * 60 * 1000;   // дані вважаються свіжими 60 хв
 const AUTOLOCK_MS = 5 * 60 * 1000;       // блокування після 5 хв у фоні
 
 const app = document.getElementById('app');
-const S = { vault: null, token: null, cache: null, prefs: { notMine: [] }, tab: 'overview', filter: 'all', open: null, status: null, busy: false };
+const S = { vault: null, token: null, cache: null, prefs: { notMine: [] }, plan: P.emptyPlan(), cal: null, day: null, edit: null, tab: 'overview', filter: 'all', open: null, status: null, busy: false };
 
 // ---------------------------------------------------------------- DOM без innerHTML (захист від XSS)
 function h(tag, attrs = {}, ...kids) {
@@ -44,7 +45,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 function lock() {
-  Object.assign(S, { vault: null, token: null, cache: null, prefs: { notMine: [] }, open: null, status: null, tab: 'overview', filter: 'all' });
+  Object.assign(S, { vault: null, token: null, cache: null, prefs: { notMine: [] }, plan: P.emptyPlan(), cal: null, day: null, edit: null, open: null, status: null, tab: 'overview', filter: 'all' });
   viewUnlock();
 }
 
@@ -92,6 +93,7 @@ async function viewUnlock() {
     S.token = await v.get('token');
     S.cache = await v.get('cache');
     S.prefs = Object.assign({ notMine: [] }, await v.get('prefs'));
+    S.plan = Object.assign(P.emptyPlan(), await v.get('plan'));
     S.token ? afterUnlock() : viewToken();
   };
   mount(h('form', { class: 'wrap center', onsubmit: go },
@@ -203,7 +205,7 @@ async function refresh() {
 }
 
 // ---------------------------------------------------------------- головний каркас
-const TABS = [['overview', '⌂', 'Огляд'], ['ops', '⇅', 'Операції'], ['accounts', '▤', 'Рахунки'], ['settings', '⚙︎', 'Налаштування']];
+const TABS = [['overview', '⌂', 'Огляд'], ['plan', '▦', 'План'], ['ops', '⇅', 'Операції'], ['accounts', '▤', 'Рахунки'], ['settings', '⚙︎', 'Ще']];
 let statusSlot = null;
 
 function renderStatus() {
@@ -215,11 +217,11 @@ function renderStatus() {
 
 function render() {
   statusSlot = h('div', {});
-  const body = { overview: viewOverview, ops: viewOps, accounts: viewAccounts, settings: viewSettings }[S.tab]();
+  const body = S.edit ? viewEdit() : { overview: viewOverview, plan: viewPlan, ops: viewOps, accounts: viewAccounts, settings: viewSettings }[S.tab]();
   const tabs = h('nav', { class: 'tabs', 'aria-label': 'Розділи' },
     TABS.map(([id, icon, name]) => h('button', {
       type: 'button', 'aria-current': S.tab === id ? 'page' : null,
-      onclick: () => { S.tab = id; S.open = null; render(); window.scrollTo(0, 0); },
+      onclick: () => { S.tab = id; S.open = null; S.edit = null; render(); window.scrollTo(0, 0); },
     }, h('span', { 'aria-hidden': 'true' }, icon), name)));
   mount(h('div', { class: 'wrap' }, statusSlot, body), tabs);
   renderStatus();
@@ -261,7 +263,7 @@ function viewOverview() {
     h('h2', {}, 'Що в мене є зараз'),
     h('div', {}, h('div', { class: 'big num' }, money(m.own, 980, { kop: true })), h('p', { class: 'muted small' }, 'своїх грошей на твоїх гривневих картках (без кредитного ліміту)')),
     h('div', { class: 'kv' },
-      m.limit ? h('div', { class: 'row' }, h('span', {}, 'Борг за кредиткою'),
+      m.limit ? h('div', { class: 'row' }, h('span', {}, 'Борг кредитки'),
         h('span', { class: 'num ' + (m.debt ? 'c-out' : 'c-in') }, m.debt ? `${money(m.debt, 980, { kop: true })} з ${money(m.limit)}` : 'немає')) : null,
       m.jars ? h('div', { class: 'row' }, h('span', {}, 'У банках (накопичення)'), h('span', { class: 'num' }, money(m.jars, 980, { kop: true }))) : null,
       m.others ? h('div', { class: 'row muted' }, h('span', {}, 'На картках, позначених «не мої»'), h('span', { class: 'num' }, money(m.others, 980, { kop: true }))) : null),
@@ -296,13 +298,9 @@ function viewOverview() {
         cats.slice(0, 8).map(([n, v]) => catRow(n, v, catMax, 'spend')),
         t.fee ? catRow('Штрафи й комісії банку', t.fee, catMax, 'fee') : null));
 
-  const soon = h('section', { class: 'card flat' },
-    h('h2', {}, 'Далі: вільно до кінця місяця'),
-    h('p', { class: 'small muted' },
-      'Наступним кроком додаси очікувані доходи (зарплати, інші банки) і обовʼязкові платежі (розстрочки, комуналка). ',
-      'Тоді тут буде головне: скільки ще прийде, скільки ще треба сплатити і скільки вільно.'));
+  const free = freeCard();
 
-  return h('div', { class: 'kv' }, header(title), have, flow, where, soon,
+  return h('div', { class: 'kv' }, header(title), free, have, flow, where,
     h('p', { class: 'muted small' }, (() => {
       const names = statementAccounts(c.info, S.prefs.notMine).map(cardName).join(', ');
       return `Рух — за всіма твоїми гривневими рахунками: ${names}. Перекази між ними не рахуються.`;
@@ -465,6 +463,250 @@ function viewSettings() {
       h('button', { class: 'btn ghost', type: 'button', onclick: lock }, 'Заблокувати зараз'),
       h('button', { class: 'btn danger', type: 'button', onclick: viewWipe }, 'Стерти все з цього телефона')),
     h('p', { class: 'muted small' }, `IcebergView ${VERSION}`));
+}
+
+// ---------------------------------------------------------------- План: вільно, календар, зобовʼязання
+function todayK() {
+  const d = kyivDate(Math.floor(Date.now() / 1000));
+  return { y: d.year, m: d.month, d: d.day };
+}
+const hasPlan = () => (S.plan.obligations.length + S.plan.incomes.length) > 0;
+const savePlan = async () => { if (S.vault) await S.vault.set('plan', S.plan); };
+const dateStr = (y, m, d) => `${y}-${P.pad(m)}-${P.pad(d)}`;
+const nameMonth = (m) => MONTHS[m - 1][0].toUpperCase() + MONTHS[m - 1].slice(1);
+
+function summaryNow() {
+  const own = S.cache && S.cache.info ? ownMoney(S.cache.info, S.prefs.notMine).own : 0;
+  return P.monthSummary(S.plan, monthOps(), own, todayK());
+}
+
+const VERDICT = {
+  green: ['ok', 'Є запас. Планові витрати — можна.'],
+  yellow: ['warn', 'Обережно: без великих необовʼязкових покупок.'],
+  red: ['bad', 'Не вистачає на обовʼязкове. Жодних необдуманих витрат.'],
+};
+
+function freeCard() {
+  if (!hasPlan()) {
+    return h('section', { class: 'card hero' },
+      h('h2', {}, 'Вільно до кінця місяця'),
+      h('p', {}, 'Щоб я порахував, скільки грошей вільно, додай у «План» очікувані доходи й обовʼязкові платежі.'),
+      h('button', { class: 'btn', type: 'button', onclick: () => { S.tab = 'plan'; render(); } }, 'Відкрити План'));
+  }
+  const s = summaryNow();
+  const own = S.cache && S.cache.info ? ownMoney(S.cache.info, S.prefs.notMine).own : 0;
+  const [cls, text] = VERDICT[s.color];
+  return h('section', { class: `card hero v-${cls}` },
+    h('h2', {}, 'Вільно до кінця місяця'),
+    h('div', { class: 'big num' }, money(s.free, 980, { kop: false })),
+    s.free > 0 ? h('p', { class: 'muted small' }, `≈ ${money(s.perDay)} на день, ${s.daysLeft} дн. до кінця місяця`) : null,
+    h('p', { class: 'verdict' }, text),
+    h('div', { class: 'kv small eq' },
+      h('div', { class: 'row' }, h('span', {}, 'Своїх грошей зараз'), h('span', { class: 'num' }, money(own))),
+      h('div', { class: 'row c-in' }, h('span', {}, '+ ще прийде'), h('span', { class: 'num' }, money(s.toCome))),
+      h('div', { class: 'row c-oblig' }, h('span', {}, '− ще сплатити обовʼязкове'), h('span', { class: 'num' }, money(s.toPay))),
+      h('div', { class: 'row total' }, h('span', {}, '= вільно'), h('b', { class: 'num' }, money(s.free)))),
+    s.gap ? h('p', { class: 'alert' }, `⚠ Касовий розрив ${s.gap.day}-го: не вистачить ≈${money(s.gap.short)}, бо платіж раніше, ніж надходження.`) : null,
+    s.late.length ? h('p', { class: 'alert' }, `⚠ Не бачу сплати: ${s.late.map(e => e.item.name).join(', ')}. Якщо сплачено — познач у «Плані».`) : null,
+    h('button', { class: 'btn ghost small', type: 'button', onclick: () => { S.tab = 'plan'; render(); } }, 'Календар платежів →'));
+}
+
+function viewPlan() {
+  const t = todayK();
+  if (!S.cal) S.cal = { y: t.y, m: t.m };
+  const { y, m } = S.cal;
+  const isCur = y === t.y && m === t.m;
+  const ops = isCur ? monthOps() : [];
+  const ev = P.monthEvents(S.plan, y, m).map(e => ({ ...e, st: P.status(e, S.plan, ops, dateStr(t.y, t.m, t.d)) }));
+  if (!isCur) for (const e of ev) if (dateStr(y, m, e.d) > dateStr(t.y, t.m, t.d)) e.st = { state: 'plan' };
+
+  const go = (k) => { const n = P.addMonths(y, m, k); S.cal = { y: n.y, m: n.m }; S.day = null; render(); };
+  const minMonth = P.addMonths(t.y, t.m, -2), maxMonth = P.addMonths(t.y, t.m, 12);
+  const canPrev = y * 12 + m > minMonth.y * 12 + minMonth.m, canNext = y * 12 + m < maxMonth.y * 12 + maxMonth.m;
+
+  // сітка: з понеділка
+  const first = new Date(Date.UTC(y, m - 1, 1)).getUTCDay();
+  const lead = (first + 6) % 7, nd = P.daysIn(y, m);
+  const cells = [];
+  for (let i = 0; i < lead; i++) cells.push(h('span', { class: 'cell empty' }));
+  for (let d = 1; d <= nd; d++) {
+    const dayEv = ev.filter(e => e.d === d);
+    const marks = dayEv.map(e => h('i', { class: `dot ${e.type === 'in' ? 'in' : 'out'} ${e.st.state}` }));
+    cells.push(h('button', {
+      type: 'button',
+      class: ['cell', dayEv.length ? 'has' : '', isCur && d === t.d ? 'today' : '', S.day === d ? 'sel' : ''].join(' '),
+      'aria-label': `${d} ${MONTHS_GEN[m - 1]}${dayEv.length ? `, подій: ${dayEv.length}` : ''}`,
+      onclick: () => { S.day = S.day === d ? null : d; render(); },
+    }, h('span', { class: 'n' }, d), h('span', { class: 'dots' }, marks)));
+  }
+  const outs = ev.filter(e => e.type === 'out'), ins = ev.filter(e => e.type === 'in');
+  const sum = (l) => l.reduce((a, e) => a + e.amount, 0);
+  const paidOut = sum(outs.filter(e => e.st.state === 'done'));
+
+  const cal = h('section', { class: 'card' },
+    h('div', { class: 'calhead' },
+      h('button', { class: 'nav', type: 'button', disabled: !canPrev, onclick: () => go(-1), 'aria-label': 'Попередній місяць' }, '‹'),
+      h('b', {}, `${nameMonth(m)} ${y}`),
+      h('button', { class: 'nav', type: 'button', disabled: !canNext, onclick: () => go(1), 'aria-label': 'Наступний місяць' }, '›')),
+    h('div', { class: 'grid wd' }, ['Пн', 'Вт', 'Ср', 'Чт', 'Пт', 'Сб', 'Нд'].map(x => h('span', {}, x))),
+    h('div', { class: 'grid' }, cells),
+    h('div', { class: 'legend' }, h('span', { class: 'oblig' }, 'платіж'), h('span', { class: 'in' }, 'дохід'),
+      h('span', { class: 'own' }, 'виконано'), h('span', { class: 'fee' }, 'не бачу сплати')),
+    h('div', { class: 'monthsum' },
+      h('div', {}, h('small', {}, 'Платежі за місяць'), h('b', { class: 'num c-oblig' }, money(sum(outs))),
+        h('small', { class: 'muted' }, `сплачено ${money(paidOut)} · ще ${money(sum(outs) - paidOut)}`)),
+      h('div', {}, h('small', {}, 'Доходи за планом'), h('b', { class: 'num c-in' }, money(sum(ins))),
+        h('small', { class: 'muted' }, `надійшло ${money(sum(ins.filter(e => e.st.state === 'done')))}`))));
+
+  const shown = S.day ? ev.filter(e => e.d === S.day) : ev;
+  const list = h('section', { class: 'card' },
+    h('h2', {}, S.day ? `${S.day} ${MONTHS_GEN[m - 1]}` : `Усе за ${MONTHS[m - 1]}`),
+    shown.length ? h('div', { class: 'evlist' }, shown.map(e => eventRow(e, isCur || dateStr(y, m, e.d) <= dateStr(t.y, t.m, t.d))))
+      : h('p', { class: 'muted small' }, S.day ? 'Цього дня нічого.' : 'У цьому місяці нічого не заплановано.'));
+
+  const fc = P.forecast(S.plan, t, 6);
+  const fmax = Math.max(1, ...fc.map(f => Math.max(f.out, f.inc)));
+  const forecast = h('section', { class: 'card' },
+    h('h2', {}, 'Прогноз обовʼязкових платежів'),
+    h('div', { class: 'cats' }, fc.map(f => h('div', { class: 'cat' },
+      h('div', { class: 'lbl' }, h('span', {}, `${nameMonth(f.m)}${f.y !== t.y ? ' ' + f.y : ''}`), h('span', { class: 'num' }, money(f.out))),
+      h('div', { class: 'bar' }, f.out ? h('i', { class: 'oblig', style: { width: `${Math.max(1.5, 100 * f.out / fmax)}%` } }) : null),
+      f.ending.length ? h('small', { class: 'muted' }, `останній платіж: ${f.ending.join(', ')}`) : null))),
+    fc.some(f => f.inc) ? h('p', { class: 'muted small' }, `Доходи за планом: ≈${money(fc[0].inc)} на місяць.`) : null);
+
+  return h('div', { class: 'kv' },
+    h('div', { class: 'top' }, h('div', {}, h('h1', {}, 'План'), h('p', { class: 'sub' }, 'календар платежів і доходів'))),
+    cal, list,
+    itemsCard('Зобовʼязання', 'obligations', 'Розстрочки, кредити, комуналка, підписки…'),
+    itemsCard('Очікувані доходи', 'incomes', 'Зарплати, надходження з інших банків…'),
+    forecast);
+}
+
+function eventRow(e, canMark) {
+  const icon = { done: '✓', late: '!', plan: e.type === 'in' ? '↓' : '🔒' }[e.st.state];
+  const how = e.st.state === 'done' ? (e.st.how === 'bank' ? 'видно у виписці monobank' : 'позначено вручну')
+    : e.st.state === 'late' ? 'дата минула, сплати не бачу' : (e.type === 'in' ? 'очікую' : 'до сплати');
+  const manual = e.st.state !== 'done' || e.st.how === 'manual';
+  return h('div', { class: `ev t-${e.type} s-${e.st.state}` },
+    h('span', { class: 'ic', 'aria-hidden': 'true' }, icon),
+    h('span', { class: 't' }, h('b', {}, e.item.name),
+      h('small', {}, [`${e.d} ${MONTHS_GEN[e.m - 1]}`, e.item.bank, e.item.count ? `платіж ${e.k + 1} з ${e.item.count}` : null, how].filter(Boolean).join(' · '))),
+    h('span', { class: 'a num' }, (e.type === 'in' ? '+' : '−') + money(e.amount)),
+    canMark && manual ? h('button', {
+      class: 'mark', type: 'button',
+      onclick: async () => {
+        if (S.plan.marks[e.key]) delete S.plan.marks[e.key]; else S.plan.marks[e.key] = true;
+        await savePlan(); render();
+      },
+    }, e.st.state === 'done' ? 'Скасувати' : (e.type === 'in' ? 'Надійшло' : 'Сплачено')) : null);
+}
+
+function itemsCard(title, kind, hint) {
+  const t = todayK(), ops = monthOps();
+  const items = S.plan[kind];
+  return h('section', { class: 'card' },
+    h('div', { class: 'row' }, h('h2', {}, title),
+      h('button', { class: 'btn small', type: 'button', onclick: () => { S.edit = { kind, item: null }; render(); window.scrollTo(0, 0); } }, '+ Додати')),
+    !items.length ? h('p', { class: 'muted small' }, hint) : null,
+    items.map(it => {
+      const amount = kind === 'obligations' ? it.payment : it.amount;
+      const rem = kind === 'obligations' ? P.remaining(it, S.plan, ops, t) : null;
+      const cost = kind === 'obligations' && it.price && it.total ? P.costOf(it.price, it.total, it.payment) : null;
+      const next = nextDate(it, t);
+      return h('button', { class: 'item', type: 'button', onclick: () => { S.edit = { kind, item: it }; render(); window.scrollTo(0, 0); } },
+        h('span', { class: 't' }, h('b', {}, it.name),
+          h('small', {}, [it.bank, next ? `наступний ${next}` : 'завершено', rem ? `лишилось ${rem.left} · ${money(rem.sum)}` : (it.count == null ? 'щомісяця' : null)].filter(Boolean).join(' · ')),
+          cost ? h('small', { class: `chip-${cost.color}` }, `${cost.color === 'green' ? '🟢' : cost.color === 'red' ? '🔴' : '🟡'} реальна ставка ${P.pct(cost.annual)} · переплата ${money(cost.overpay)}`) : null),
+        h('span', { class: 'a num ' + (kind === 'obligations' ? 'c-oblig' : 'c-in') }, money(amount)));
+    }));
+}
+
+function nextDate(it, t) {
+  for (let k = 0; k < 600; k++) {
+    if (it.count != null && k >= it.count) return null;
+    const d = P.occurrenceDate(it.first, k);
+    if (dateStr(d.y, d.m, d.d) >= dateStr(t.y, t.m, t.d)) return `${d.d} ${MONTHS_GEN[d.m - 1]}`;
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------- форма
+function viewEdit() {
+  const { kind, item } = S.edit;
+  const ob = kind === 'obligations';
+  const it = item || {};
+  const err = h('p', { class: 'err', role: 'alert' });
+  const field = (id, label, attrs = {}, hint) => h('label', { for: id }, label,
+    h('input', { id, autocomplete: 'off', ...attrs }), hint ? h('small', { class: 'muted' }, hint) : null);
+  const moneyVal = v => (v ? String(v / 100).replace('.', ',') : '');
+  const t = todayK();
+  const regular = ob ? it.count == null && !!item : true;
+
+  const save = async (e) => {
+    e.preventDefault();
+    const v = id => (document.getElementById(id)?.value || '').trim();
+    const name = v('f-name');
+    const amount = P.parseMoney(v('f-amount'));
+    const first = v('f-first');
+    const isReg = ob ? document.getElementById('f-reg').checked : true;
+    const left = isReg ? null : parseInt(v('f-left'), 10);
+    if (!name) return (err.textContent = 'Вкажи назву.');
+    if (!amount) return (err.textContent = 'Вкажи суму, наприклад 1250 або 1250,50.');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(first)) return (err.textContent = 'Вкажи дату.');
+    if (!isReg && !(left >= 1 && left <= 600)) return (err.textContent = 'Скільки платежів лишилось — від 1 до 600.');
+    const rec = {
+      id: it.id || P.newId(), name, bank: v('f-bank'), first, count: isReg ? null : left, match: v('f-match'),
+    };
+    if (ob) {
+      rec.payment = amount;
+      const price = P.parseMoney(v('f-price')), total = parseInt(v('f-total'), 10);
+      if (price) rec.price = price;
+      if (total >= 1) rec.total = total;
+    } else rec.amount = amount;
+    const list = S.plan[kind];
+    const i = list.findIndex(x => x.id === rec.id);
+    if (i >= 0) list[i] = rec; else list.push(rec);
+    await savePlan();
+    S.edit = null; S.tab = 'plan'; render();
+  };
+  const del = async () => {
+    if (!delBtn.dataset.sure) { delBtn.dataset.sure = '1'; delBtn.textContent = 'Точно видалити? Натисни ще раз'; return; }
+    S.plan[kind] = S.plan[kind].filter(x => x.id !== it.id);
+    for (const k of Object.keys(S.plan.marks)) if (k.startsWith(it.id + ':')) delete S.plan.marks[k];
+    await savePlan(); S.edit = null; render();
+  };
+  const delBtn = h('button', { class: 'btn danger', type: 'button', onclick: del }, 'Видалити');
+  const regBox = ob ? h('label', { class: 'check' },
+    h('input', { id: 'f-reg', type: 'checkbox', checked: regular && !!item ? true : null,
+      onchange: (e) => { leftWrap.hidden = e.target.checked; costWrap.hidden = e.target.checked; } }),
+    h('span', {}, 'Регулярний без кінця (комуналка, підписка, звʼязок)')) : null;
+  const leftWrap = field('f-left', 'Скільки платежів лишилось (разом із найближчим)',
+    { type: 'text', inputmode: 'numeric', value: it.count ?? '' }, 'Наприклад, «лишилось 4 з 10» → 4');
+  const costWrap = h('div', { class: 'kv' },
+    h('p', { class: 'small muted' }, 'Для розрахунку вигідності (необовʼязково):'),
+    field('f-price', 'Ціна покупки або сума кредиту, грн', { type: 'text', inputmode: 'decimal', value: moneyVal(it.price) }),
+    field('f-total', 'Усього платежів за договором', { type: 'text', inputmode: 'numeric', value: it.total ?? '' }));
+  if (ob && regular && item) { leftWrap.hidden = true; costWrap.hidden = true; }
+
+  return h('form', { class: 'kv', onsubmit: save },
+    h('div', { class: 'top' }, h('h1', {}, item ? 'Змінити' : (ob ? 'Нове зобовʼязання' : 'Новий дохід')),
+      h('button', { class: 'btn ghost small', type: 'button', onclick: () => { S.edit = null; render(); } }, 'Скасувати')),
+    h('section', { class: 'card' },
+      field('f-name', 'Назва', { type: 'text', value: it.name || '', placeholder: ob ? 'Розстрочка Comfy, комуналка…' : 'Зарплата Philips…' }),
+      field('f-bank', 'Банк або звідки', { type: 'text', value: it.bank || '', list: 'banks', placeholder: 'monobank, ПУМБ, Raiffeisen…' }),
+      h('datalist', { id: 'banks' }, ['monobank', 'ПУМБ', 'Raiffeisen', 'ПриватБанк', 'Ощадбанк', 'Готівка'].map(b => h('option', { value: b }))),
+      field('f-amount', ob ? 'Платіж на місяць, грн' : 'Сума, грн', { type: 'text', inputmode: 'decimal', value: moneyVal(ob ? it.payment : it.amount) }),
+      field('f-first', ob ? 'Дата найближчого платежу' : 'Дата найближчого надходження',
+        { type: 'date', value: it.first || dateStr(t.y, t.m, t.d) }, 'Далі — щомісяця того ж числа'),
+      regBox, ob ? leftWrap : null),
+    ob ? h('section', { class: 'card' }, costWrap) : null,
+    h('section', { class: 'card' },
+      field('f-match', 'Слово для автопошуку у виписці monobank (необовʼязково)', { type: 'text', value: it.match || '',
+        placeholder: ob ? 'частинами, Comfy, Погашення…' : 'Філіпс, ДДМУ…' },
+      'Якщо у виписці буде операція з цим словом і схожою сумою (±10%) — позначу ✓ сам.')),
+    err,
+    h('button', { class: 'btn', type: 'submit' }, 'Зберегти'),
+    item ? delBtn : null);
 }
 
 start().catch(() => mount(h('div', { class: 'wrap center' }, h('p', { class: 'err' }, 'Не вдалося запустити. Онови сторінку.'))));

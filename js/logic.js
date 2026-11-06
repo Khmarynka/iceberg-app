@@ -78,15 +78,25 @@ const OWN_RE = /^(з|на|із)\s+(чорн|біл|залізн|платинов
 export function ownMarkers(info) {
   const ibans = new Set((info.accounts || []).map(a => a.iban).filter(Boolean));
   const jars = (info.jars || []).map(j => (j.title || '').toLowerCase()).filter(Boolean);
-  return { ibans, jars };
+  // імʼя й прізвище власника: переказ «від/на себе» — свій (потрібні ОБИДВА слова, щоб не плутати з родичами)
+  const name = (info.name || '').toLowerCase().split(/\s+/).filter(w => w.length >= 3);
+  return { ibans, jars, name };
 }
+
+// Перекази й готівка: такі MCC у надходженнях — справжній прихід; інші MCC у плюсі — повернення від магазину.
+const TRANSFER_MCC = new Set([0, 4829, 6010, 6011, 6012, 6536, 6537, 6538, 6540]);
+const REFUND_WORDS = ['повернення', 'скасування', 'відміна', 'refund', 'cancel', 'reversal'];
 
 export function classify(item, markers) {
   const desc = (item.description || '').toLowerCase().trim();
   const amt = +item.amount || 0;
   if (item.counterIban && markers.ibans.has(item.counterIban)) return 'own';
   if (OWN_RE.test(desc) || markers.jars.some(j => j && desc.includes(j))) return 'own';
-  if (amt > 0) return 'income';
+  if (markers.name && markers.name.length >= 2 && markers.name.every(w => desc.includes(w))) return 'own';
+  if (amt > 0) {
+    if (REFUND_WORDS.some(w => desc.includes(w)) || !TRANSFER_MCC.has(+item.mcc || 0)) return 'refund';
+    return 'income';
+  }
   if (FEE_WORDS.some(w => desc.includes(w))) return 'fee';
   if (CREDIT_WORDS.some(w => desc.includes(w))) return 'credit';
   return 'spend';
@@ -105,9 +115,26 @@ export function toOps(items, info, acc = null) {
 
 /** Операції з усіх рахунків: byAcc = { accountId: [items] }. */
 export function allOps(byAcc, info) {
-  return Object.entries(byAcc || {})
+  const ops = Object.entries(byAcc || {})
     .flatMap(([acc, items]) => toOps(items || [], info, acc))
     .sort((a, b) => b.time - a.time);
+  pairOwnTransfers(ops);
+  return ops;
+}
+
+/** Переказ між своїми рахунками: мінус на одному і такий самий плюс на іншому протягом 10 хв → обидва «свої». */
+export function pairOwnTransfers(ops, windowSec = 600) {
+  const used = new Set();
+  for (const out of ops) {
+    if (out.amount >= 0 || out.kind === 'own' || used.has(out.id)) continue;
+    const match = ops.find(o => !used.has(o.id) && o.acc && out.acc && o.acc !== out.acc &&
+      o.amount === -out.amount && Math.abs(o.time - out.time) <= windowSec);
+    if (match) {
+      out.kind = 'own'; match.kind = 'own';
+      used.add(out.id); used.add(match.id);
+    }
+  }
+  return ops;
 }
 
 /** Гривневі рахунки, з яких беремо виписку: усі, крім «не моїх»; основна картка — першою. */
@@ -118,19 +145,23 @@ export function statementAccounts(info, notMine = []) {
 }
 
 export function totals(ops) {
-  const t = { income: 0, spend: 0, credit: 0, fee: 0, ownIn: 0, ownOut: 0, byCat: {} };
+  const t = { income: 0, spend: 0, credit: 0, fee: 0, ownIn: 0, ownOut: 0, refund: 0, byCat: {} };
   for (const o of ops) {
     const a = o.amount;
     if (o.kind === 'income') t.income += a;
     else if (o.kind === 'own') { if (a > 0) t.ownIn += a; else t.ownOut -= a; }
     else if (o.kind === 'credit') t.credit -= a;
     else if (o.kind === 'fee') t.fee -= a;
-    else if (o.kind === 'spend') {
+    else if (o.kind === 'spend' || o.kind === 'refund') {
+      // повернення від магазину зменшує витрати своєї категорії, а не збільшує прихід
+      if (o.kind === 'refund') t.refund += a;
       t.spend -= a;
       const c = category(o.mcc);
       t.byCat[c] = (t.byCat[c] || 0) - a;
     }
   }
+  t.spend = Math.max(0, t.spend);
+  for (const c of Object.keys(t.byCat)) if (t.byCat[c] <= 0) delete t.byCat[c];
   t.out = t.spend + t.credit + t.fee;
   t.net = t.income - t.out;
   return t;

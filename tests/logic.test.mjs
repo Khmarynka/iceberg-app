@@ -133,3 +133,41 @@ test('all own accounts: FOP income -> white card -> repayment; own transfers exc
   assert.equal(t.ownIn + t.ownOut, 6000000);                  // ФОП→біла видно, але не рахується
   assert.equal(ops.find(o => o.desc === 'ТОВ Філіпс Юкрейн').acc, 'fop');
 });
+
+test('owner case 6 Nov: FOP income 49k, odd transfer text, 14k merchant refund → income 49k only', () => {
+  const info = { name: 'Сербіненко Євгеній', accounts: [
+    { id: 'fop', iban: 'UA00FOP', currencyCode: 980, type: 'fop', balance: 0, creditLimit: 0 },
+    { id: 'white', iban: 'UA22WHITE', currencyCode: 980, type: 'white', balance: 0, creditLimit: 0 },
+    { id: 'black', iban: 'UA11BLACK', currencyCode: 980, type: 'black', balance: 1129, creditLimit: 15000000 },
+  ], jars: [] };
+  const T = 1793900000;
+  const byAcc = {
+    fop: [
+      { id: 'a', time: T, amount: 4900000, description: 'Оплата за договором ТОВ «Філіпс Юкрейн»', mcc: 0 },
+      { id: 'b', time: T + 300, amount: -4900000, description: 'Переказ на картку', mcc: 4829 },      // без IBAN і без «білу»
+    ],
+    white: [
+      { id: 'c', time: T + 301, amount: 4900000, description: 'Поповнення', mcc: 4829 },             // пара до b
+      { id: 'd', time: T + 900, amount: -3000000, description: 'Погашення наступного платежу', mcc: 0 },
+      { id: 'e', time: T + 1200, amount: 2000000, description: 'Сербіненко Євгеній', mcc: 4829 },     // сам собі з іншого банку
+    ],
+    black: [
+      { id: 'f', time: T - 86400, amount: -1600000, description: 'Rozetka', mcc: 5732 },
+      { id: 'g', time: T + 600, amount: 1400000, description: 'Rozetka', mcc: 5732 },                // повернення від магазину
+    ],
+  };
+  const ops = allOps(byAcc, info);
+  const k = Object.fromEntries(ops.map(o => [o.id.split(':')[1], o.kind]));
+  assert.deepEqual(k, { a: 'income', b: 'own', c: 'own', d: 'credit', e: 'own', f: 'spend', g: 'refund' });
+  const t = totals(ops);
+  assert.equal(t.income, 4900000);                 // а не 49k + 49k + 14k + 20k
+  assert.equal(t.refund, 1400000);
+  assert.equal(t.spend, 200000);                   // 16 000 − 14 000
+  assert.equal(t.byCat['Техніка'], 200000);
+});
+
+test('relative with same surname is not "own"', () => {
+  const info = { name: 'Сербіненко Євгеній', accounts: [], jars: [] };
+  const ops = allOps({ x: [{ id: '1', time: 1, amount: 50000, description: 'Сербіненко Олександр', mcc: 4829 }] }, info);
+  assert.equal(ops[0].kind, 'income');
+});

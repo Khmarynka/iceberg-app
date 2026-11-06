@@ -223,3 +223,5 @@ label small { font-size: 12.5px; }
 .filebtn { display: inline-flex; align-items: center; cursor: pointer; }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; }
 .note div { margin-top: 6px; color: var(--ink); }
+
+.k-refund .ic { background: var(--own-soft); color: var(--in); } .k-refund .a { color: var(--in); }

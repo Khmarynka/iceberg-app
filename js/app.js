@@ -9,7 +9,7 @@ import {
   cardName, CURRENCY, allOps, statementAccounts,
 } from './logic.js';
 
-export const VERSION = '0.2.1';
+export const VERSION = '0.2.2';
 const CACHE_FRESH_MS = 60 * 60 * 1000;   // дані вважаються свіжими 60 хв
 const AUTOLOCK_MS = 5 * 60 * 1000;       // блокування після 5 хв у фоні
 
@@ -282,7 +282,8 @@ function viewOverview() {
       h('span', { class: 'in' }, 'прихід'),
       h('span', { class: 'oblig' }, `погашення ${money(t.credit)}`),
       h('span', { class: 'spend' }, `покупки ${money(t.spend)}`),
-      t.fee ? h('span', { class: 'fee' }, `штрафи банку ${money(t.fee)}`) : null),
+      t.fee ? h('span', { class: 'fee' }, `штрафи банку ${money(t.fee)}`) : null,
+      t.refund ? h('span', { class: 'own' }, `повернення ${money(t.refund)} (вже відняті з покупок)`) : null),
     h('div', { class: 'net ' + (t.net >= 0 ? 'pos' : 'neg') },
       h('span', {}, t.net >= 0 ? 'Прийшло більше, ніж пішло' : 'Пішло більше, ніж прийшло'),
       h('span', { class: 'num' }, money(t.net, 980, { sign: true }))),
@@ -319,8 +320,9 @@ function catRow(name, v, max, cls) {
 const KIND = {
   income: ['↓', 'Прихід'], spend: ['↑', 'Покупка'], credit: ['🔒', 'Обовʼязкове: погашення'],
   fee: ['!', 'Штраф чи комісія банку'], own: ['⇄', 'Між своїми рахунками'],
+  refund: ['↩', 'Повернення від магазину (зменшує витрати)'],
 };
-const FILTERS = [['all', 'Усі'], ['income', 'Прихід'], ['spend', 'Покупки'], ['credit', 'Обовʼязкові'], ['fee', 'Штрафи'], ['own', 'Свої перекази']];
+const FILTERS = [['all', 'Усі'], ['income', 'Прихід'], ['spend', 'Покупки'], ['credit', 'Обовʼязкові'], ['fee', 'Штрафи'], ['own', 'Свої перекази'], ['refund', 'Повернення']];
 
 function viewOps() {
   const ops = monthOps();

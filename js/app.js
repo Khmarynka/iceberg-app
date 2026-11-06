@@ -4,12 +4,13 @@ import { Vault, pinDelay, pinFailed, pinOk } from './vault.js';
 import * as mono from './mono.js';
 import * as P from './plan.js';
 import { prepareImage, scanImage, ScanError } from './scan.js';
+import { compareOptions, DEFAULT_TARIFFS, breakEvenDays } from './credit.js';
 import {
   money, monthStartUnix, kyivDate, MONTHS, MONTHS_GEN, category, totals, ownMoney,
   cardName, CURRENCY, allOps, statementAccounts,
 } from './logic.js';
 
-export const VERSION = '0.2.6';
+export const VERSION = '0.3.0';
 const CACHE_FRESH_MS = 60 * 60 * 1000;   // дані вважаються свіжими 60 хв
 const AUTOLOCK_MS = 5 * 60 * 1000;       // блокування після 5 хв у фоні
 
@@ -46,7 +47,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 function lock() {
-  Object.assign(S, { vault: null, token: null, cache: null, prefs: { notMine: [], kinds: {} }, plan: P.emptyPlan(), cal: null, day: null, edit: null, aikey: null, queue: [], open: null, status: null, tab: 'overview', filter: 'all' });
+  Object.assign(S, { advisor: null, vault: null, token: null, cache: null, prefs: { notMine: [], kinds: {} }, plan: P.emptyPlan(), cal: null, day: null, edit: null, aikey: null, queue: [], open: null, status: null, tab: 'overview', filter: 'all' });
   viewUnlock();
 }
 
@@ -224,11 +225,11 @@ function renderStatus() {
 
 function render() {
   statusSlot = h('div', {});
-  const body = S.edit ? viewEdit() : { overview: viewOverview, plan: viewPlan, ops: viewOps, accounts: viewAccounts, settings: viewSettings }[S.tab]();
+  const body = S.edit ? viewEdit() : S.advisor ? viewAdvisor() : { overview: viewOverview, plan: viewPlan, ops: viewOps, accounts: viewAccounts, settings: viewSettings }[S.tab]();
   const tabs = h('nav', { class: 'tabs', 'aria-label': 'Розділи' },
     TABS.map(([id, icon, name]) => h('button', {
       type: 'button', 'aria-current': S.tab === id ? 'page' : null,
-      onclick: () => { S.tab = id; S.open = null; S.edit = null; render(); window.scrollTo(0, 0); },
+      onclick: () => { S.tab = id; S.open = null; S.edit = null; S.advisor = null; render(); window.scrollTo(0, 0); },
     }, h('span', { 'aria-hidden': 'true' }, icon), name)));
   mount(h('div', { class: 'wrap' }, statusSlot, body), tabs);
   renderStatus();
@@ -495,6 +496,7 @@ function viewSettings() {
       h('h2', {}, 'Змінити PIN'), pinInput('np1', 'Новий PIN'), pinInput('np2', 'Ще раз'), msg,
       h('button', { class: 'btn ghost', type: 'submit' }, 'Змінити PIN')),
     aiCard(),
+    tariffsCard(),
     h('section', { class: 'card' },
       h('h2', {}, 'monobank'),
       h('button', { class: 'btn ghost', type: 'button', onclick: viewToken }, 'Замінити токен'),
@@ -608,7 +610,9 @@ function freeCard() {
       h('div', { class: 'row total' }, h('span', {}, '= вільно'), h('b', { class: 'num' }, money(s.free)))),
     s.gap ? h('p', { class: 'alert' }, `⚠ Касовий розрив ${s.gap.day}-го: не вистачить ≈${money(s.gap.short)}, бо платіж раніше, ніж надходження.`) : null,
     s.late.length ? h('p', { class: 'alert' }, `⚠ Не бачу сплати: ${s.late.map(e => e.item.name).join(', ')}. Якщо сплачено — познач у «Плані».`) : null,
-    h('button', { class: 'btn ghost small', type: 'button', onclick: () => { S.tab = 'plan'; render(); } }, 'Календар платежів →'));
+    h('div', { class: 'btns left' },
+      h('button', { class: 'btn ghost small', type: 'button', onclick: () => { S.tab = 'plan'; render(); } }, 'Календар платежів →'),
+      advisorButton()));
 }
 
 function viewPlan() {
@@ -675,7 +679,7 @@ function viewPlan() {
     fc.some(f => f.inc) ? h('p', { class: 'muted small' }, `Доходи за планом: ≈${money(fc[0].inc)} на місяць.`) : null);
 
   return h('div', { class: 'kv' },
-    h('div', { class: 'top' }, h('div', {}, h('h1', {}, 'План'), h('p', { class: 'sub' }, 'календар платежів і доходів'))),
+    h('div', { class: 'top' }, h('div', {}, h('h1', {}, 'План'), h('p', { class: 'sub' }, 'календар платежів і доходів')), advisorButton()),
     cal, list,
     itemsCard('Зобовʼязання', 'obligations', 'Розстрочки, кредити, комуналка, підписки…'),
     itemsCard('Очікувані доходи', 'incomes', 'Зарплати, надходження з інших банків…'),
@@ -819,6 +823,94 @@ function viewEdit() {
     err,
     h('button', { class: 'btn', type: 'submit' }, 'Зберегти'),
     item ? delBtn : null);
+}
+
+
+// ---------------------------------------------------------------- Порадник: як дешевше взяти гроші
+function advisorButton() {
+  return h('button', { class: 'btn ghost small', type: 'button', onclick: () => { S.advisor = S.advisor || { amount: '', days: 30, partner: false, goal: '' }; render(); window.scrollTo(0, 0); } }, '💡 Як дешевше взяти гроші');
+}
+const tariffs = () => ({ ...DEFAULT_TARIFFS, ...(S.prefs.tariffs || {}) });
+
+function viewAdvisor() {
+  const A = S.advisor;
+  const amount = P.parseMoney(A.amount);
+  const read = () => {
+    A.amount = document.getElementById('a-amt').value;
+    A.goal = document.getElementById('a-goal').value;
+    A.partner = document.getElementById('a-partner').checked;
+    const d = parseInt(document.getElementById('a-days').value, 10);
+    if (d > 0) A.days = Math.min(730, d);
+  };
+  const calc = (e) => { e && e.preventDefault(); read(); render(); };
+  const presets = [[7, 'тиждень'], [14, '2 тижні'], [30, 'місяць'], [90, '3 міс.'], [180, 'півроку'], [365, 'рік']];
+
+  const form = h('form', { class: 'card', onsubmit: calc },
+    h('label', { for: 'a-amt' }, 'Скільки потрібно, грн', h('input', { id: 'a-amt', type: 'text', inputmode: 'decimal', value: A.amount, placeholder: '10 000' })),
+    h('label', { for: 'a-days' }, 'Коли зможеш повернути (днів)', h('input', { id: 'a-days', type: 'text', inputmode: 'numeric', value: String(A.days) })),
+    h('div', { class: 'chips' }, presets.map(([d, n]) => h('button', {
+      class: 'chip', type: 'button', 'aria-pressed': String(A.days === d),
+      onclick: () => { read(); A.days = d; render(); },
+    }, n))),
+    h('label', { for: 'a-goal' }, 'На що (необовʼязково)', h('input', { id: 'a-goal', type: 'text', value: A.goal, placeholder: 'ремонт авто, техніка, до зарплати…' })),
+    h('label', { class: 'check' }, h('input', { id: 'a-partner', type: 'checkbox', checked: A.partner ? true : null }),
+      h('span', {}, 'Купую в магазині, де є «Покупка частинами»')),
+    h('button', { class: 'btn', type: 'submit' }, 'Порахувати'));
+
+  const out = [];
+  if (amount) {
+    const r = compareOptions(amount, A.days, { partner: A.partner, tariffs: tariffs() });
+    const free = hasPlan() ? summaryNow().free : null;
+    if (free != null && free >= amount) {
+      out.push(h('section', { class: 'card hero v-ok' }, h('h2', {}, 'Можна без кредиту'),
+        h('p', {}, `За планом у тебе вільно ${money(free)} до кінця місяця — це більше за ${money(amount)}. Кредит не потрібен, якщо це не зачепить обовʼязкові платежі.`)));
+    }
+    out.push(h('section', { class: 'card' },
+      h('h2', {}, `${money(amount)} на ${A.days} дн.${A.goal ? ` · ${A.goal}` : ''}`),
+      r.options.map((o, i) => h('div', { class: 'opt' + (i === 0 ? ' best' : '') },
+        h('div', { class: 'row' }, h('b', {}, (i === 0 ? '✅ ' : '') + o.name), h('b', { class: 'num ' + (o.cost ? 'c-out' : 'c-in') }, o.cost ? `переплата ${money(o.cost)}` : 'без переплати')),
+        h('small', {}, o.how),
+        h('small', {}, `Віддаси разом ${money(o.total)} · ${o.schedule}`),
+        (o.annualEffective ?? o.annualSimple) ? h('small', { class: 'muted' }, o.annualEffective != null
+          ? `реальна ставка ≈${Math.round(o.annualEffective * 100)}% річних (з урахуванням щомісячних платежів)`
+          : `≈${Math.round(o.annualSimple * 100)}% річних`) : null,
+        o.note ? h('small', { class: 'c-fee' }, o.note) : null,
+        free != null && o.payment ? h('small', { class: o.payment > Math.max(free, 0) ? 'c-out' : 'muted' },
+          `Щомісячний платіж ${money(o.payment)} — ${free > 0 ? `${Math.round(100 * o.payment / free)}% від вільних цього місяця` : 'а вільних грошей цього місяця немає'}`) : null)),
+      h('p', { class: 'small' }, `Правило: до ≈${r.breakEvenDays} днів дешевше кредит готівкою (платиш по днях), довше — розстрочка (комісія одразу за ${tariffs().instMinMonths}+ міс.). У магазині-партнері — Покупка частинами, 0%.`),
+      h('p', { class: 'muted small' }, 'Тарифи — за паспортом кредиту monobank, змінити: «Ще → Тарифи». Це розрахунок, а не порада: рішення — за тобою.')));
+  }
+  return h('div', { class: 'kv' },
+    h('div', { class: 'top' }, h('h1', {}, 'Як дешевше взяти гроші'),
+      h('button', { class: 'btn ghost small', type: 'button', onclick: () => { S.advisor = null; render(); } }, 'Закрити')),
+    form, out);
+}
+
+function tariffsCard() {
+  const t = tariffs();
+  const msg = h('p', { class: 'err', role: 'alert' });
+  const pct = v => String(+(v * 100).toFixed(3)).replace('.', ',');
+  const save = async (e) => {
+    e.preventDefault();
+    const n = id => parseFloat(document.getElementById(id).value.replace(',', '.'));
+    const cash = n('t-cash') / 100, inst = n('t-inst') / 100, min = Math.round(n('t-min')), cmin = Math.round(n('t-cmin'));
+    if (!(cash > 0 && cash < 0.05 && inst > 0 && inst < 0.1 && min >= 1 && min <= 24 && cmin >= 1 && cmin <= 30)) return (msg.textContent = 'Перевір числа.');
+    S.prefs.tariffs = { cashPerDay: cash, cashMinDays: cmin, instPerMonth: inst, instMinMonths: min };
+    await S.vault.set('prefs', S.prefs);
+    msg.textContent = '✅ Збережено.';
+  };
+  const reset = async () => { delete S.prefs.tariffs; await S.vault.set('prefs', S.prefs); render(); };
+  const f = (id, label, v) => h('label', { for: id }, label, h('input', { id, type: 'text', inputmode: 'decimal', value: v }));
+  return h('form', { class: 'card', onsubmit: save },
+    h('h2', {}, 'Тарифи для порадника (monobank)'),
+    f('t-cash', 'Кредит готівкою: % на день', pct(t.cashPerDay)),
+    f('t-cmin', 'Кредит готівкою: мінімум днів відсотків (уточни в договорі)', String(t.cashMinDays)),
+    f('t-inst', 'Розстрочка на картку: % комісії за кожен місяць', pct(t.instPerMonth)),
+    f('t-min', 'Розстрочка: мінімум місяців', String(t.instMinMonths)),
+    h('p', { class: 'small muted' }, 'За замовчуванням — з паспорта споживчого кредиту monobank (листопад 2026). Якщо банк змінить умови — виправ тут.'),
+    msg,
+    h('div', { class: 'btns left' }, h('button', { class: 'btn small', type: 'submit' }, 'Зберегти'),
+      S.prefs.tariffs ? h('button', { class: 'btn ghost small', type: 'button', onclick: reset }, 'Як у банку за замовчуванням') : null));
 }
 
 start().catch(() => mount(h('div', { class: 'wrap center' }, h('p', { class: 'err' }, 'Не вдалося запустити. Онови сторінку.'))));

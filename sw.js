@@ -1,7 +1,7 @@
 // IcebergView — кеш файлів застосунку (щоб відкривався швидко й без інтернету).
 // Дані банку тут НЕ кешуються: запити до monobank завжди йдуть напряму в мережу.
-const V = 'iceberg-0.2.6';
-const SHELL = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/logic.js', 'js/mono.js', 'js/vault.js', 'js/plan.js', 'js/scan.js',
+const V = 'iceberg-0.3.0';
+const SHELL = ['./', 'index.html', 'css/app.css', 'js/app.js', 'js/logic.js', 'js/mono.js', 'js/vault.js', 'js/plan.js', 'js/scan.js', 'js/credit.js',
   'manifest.webmanifest', 'icons/icon-192.png', 'icons/icon-512.png', 'icons/apple-touch-icon.png', 'icons/icon-maskable-512.png', 'icons/hero-480.jpg'];
 
 self.addEventListener('install', e => e.waitUntil(caches.open(V).then(c => c.addAll(SHELL)).then(() => self.skipWaiting())));

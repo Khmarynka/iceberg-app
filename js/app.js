@@ -3,11 +3,11 @@
 import { Vault, pinDelay, pinFailed, pinOk } from './vault.js';
 import * as mono from './mono.js';
 import {
-  money, monthStartUnix, kyivDate, MONTHS, MONTHS_GEN, category, toOps, totals, ownMoney,
-  mainAccount, cardName, CURRENCY,
+  money, monthStartUnix, kyivDate, MONTHS, MONTHS_GEN, category, totals, ownMoney,
+  cardName, CURRENCY, allOps, statementAccounts,
 } from './logic.js';
 
-export const VERSION = '0.1.1';
+export const VERSION = '0.1.2';
 const CACHE_FRESH_MS = 60 * 60 * 1000;   // дані вважаються свіжими 60 хв
 const AUTOLOCK_MS = 5 * 60 * 1000;       // блокування після 5 хв у фоні
 
@@ -123,7 +123,7 @@ function viewToken() {
       const info = await mono.clientInfo(t);
       await S.vault.set('token', t);
       S.token = t;
-      S.cache = { info, infoAt: Date.now(), items: [], monthStart: 0, fetchedAt: 0 };
+      S.cache = { info, infoAt: Date.now(), byAcc: {}, monthStart: 0, fetchedAt: 0 };
       await S.vault.set('cache', S.cache);
       S.tab = 'overview';
       afterUnlock();
@@ -151,8 +151,9 @@ function needsRefresh() {
   const c = S.cache;
   if (!c || !c.fetchedAt) return true;
   if (Date.now() - c.fetchedAt > CACHE_FRESH_MS) return true;
-  const main = mainAccount(c.info || {}, S.prefs.notMine);
-  if (main && c.account && main.id !== c.account) return true;
+  if (!c.byAcc) return true;                                   // старий формат (лише одна картка)
+  const want = statementAccounts(c.info || {}, S.prefs.notMine).map(a => a.id).sort().join();
+  if (want !== Object.keys(c.byAcc).sort().join()) return true;
   return c.monthStart !== monthStartUnix(Date.now());
 }
 
@@ -166,15 +167,31 @@ function setStatus(text, bad = false) { S.status = text ? { text, bad } : null; 
 async function refresh() {
   if (S.busy) return;
   S.busy = true;
-  const onWait = (s) => setStatus(s > 0 ? `monobank дозволяє 1 запит на хвилину — чекаю ${s} с…` : 'Беру дані з monobank…');
+  let step = '';
+  const onWait = (sec) => setStatus(sec > 0
+    ? `${step}monobank дозволяє 1 запит на хвилину — чекаю ${sec} с…`
+    : `${step}беру дані з monobank…`);
   try {
     setStatus('Беру дані з monobank…');
     const info = await mono.clientInfo(S.token, onWait);
-    const acc = mainAccount(info, S.prefs.notMine);
+    const accs = statementAccounts(info, S.prefs.notMine);
     const now = Date.now();
     const from = monthStartUnix(now);
-    const items = acc ? await mono.statement(S.token, acc.id, from, Math.floor(now / 1000), onWait) : [];
-    S.cache = { info, infoAt: now, items, monthStart: from, fetchedAt: now, account: acc && acc.id };
+    const old = S.cache && S.cache.monthStart === from && S.cache.byAcc ? S.cache.byAcc : {};
+    // одразу показуємо нові баланси, а виписки довантажуємо по одній
+    S.cache = { info, infoAt: now, byAcc: {}, monthStart: from, fetchedAt: now, pending: accs.map(a => a.id) };
+    for (const a of accs) if (old[a.id]) S.cache.byAcc[a.id] = old[a.id];
+    render();
+    for (let i = 0; i < accs.length; i++) {
+      const a = accs[i];
+      step = accs.length > 1 ? `Рахунок ${i + 1} з ${accs.length} (${cardName(a)}): ` : '';
+      S.cache.byAcc[a.id] = await mono.statement(S.token, a.id, from, Math.floor(Date.now() / 1000), onWait);
+      S.cache.pending = accs.slice(i + 1).map(x => x.id);
+      if (S.vault) await S.vault.set('cache', S.cache);
+      render();
+    }
+    delete S.cache.pending;
+    S.cache.fetchedAt = Date.now();
     if (S.vault) await S.vault.set('cache', S.cache);
     setStatus(null);
   } catch (x) {
@@ -222,7 +239,7 @@ function header(title) {
 
 function monthOps() {
   const c = S.cache;
-  return c && c.items ? toOps(c.items, c.info || {}) : [];
+  return c && c.byAcc ? allOps(c.byAcc, c.info || {}) : [];
 }
 
 // ---------------------------------------------------------------- Огляд
@@ -287,8 +304,8 @@ function viewOverview() {
 
   return h('div', { class: 'kv' }, header(title), have, flow, where, soon,
     h('p', { class: 'muted small' }, (() => {
-      const a = mainAccount(c.info, S.prefs.notMine);
-      return `Рух — за карткою ${a ? cardName(a) : 'monobank'}. Перекази на інші свої картки не рахуються.`;
+      const names = statementAccounts(c.info, S.prefs.notMine).map(cardName).join(', ');
+      return `Рух — за всіма твоїми гривневими рахунками: ${names}. Перекази між ними не рахуються.`;
     })()));
 }
 
@@ -336,6 +353,11 @@ function viewOps() {
     h('p', { class: 'muted small' }, 'Торкнись операції, щоб побачити деталі.'));
 }
 
+function accName(id) {
+  const a = ((S.cache && S.cache.info && S.cache.info.accounts) || []).find(x => x.id === id);
+  return a ? cardName(a) : '';
+}
+
 function opRow(o) {
   const [icon, kindName] = KIND[o.kind];
   const sub = o.kind === 'spend' ? category(o.mcc) : kindName;
@@ -346,11 +368,12 @@ function opRow(o) {
     onclick: () => { S.open = open ? null : o.id; render(); },
   },
   h('span', { class: 'ic', 'aria-hidden': 'true' }, icon),
-  h('span', { class: 't' }, h('b', {}, o.desc || '—'), h('small', {}, `${d.hm} · ${sub}`)),
+  h('span', { class: 't' }, h('b', {}, o.desc || '—'), h('small', {}, [d.hm, sub, accName(o.acc)].filter(Boolean).join(' · '))),
   h('span', { class: 'a num' }, money(o.amount, 980, { sign: true })));
   if (!open) return row;
   return [row, h('div', { class: 'more' },
     h('span', {}, `Тип: ${kindName}`),
+    o.acc ? h('span', {}, `Рахунок: ${accName(o.acc)}`) : null,
     o.kind === 'spend' ? h('span', {}, `Категорія: ${category(o.mcc)} (MCC ${o.mcc})`) : null,
     o.balance != null ? h('span', {}, `Баланс після: ${money(o.balance)}`) : null,
     o.cashback ? h('span', {}, `Кешбек: ${money(o.cashback)}`) : null)];
@@ -386,8 +409,7 @@ function viewAccounts() {
           S.prefs.notMine = [...set];
           await S.vault.set('prefs', S.prefs);
           render();
-          const main = mainAccount(S.cache.info, S.prefs.notMine);
-          if (main && main.id !== S.cache.account) refresh();   // виписка мала бути з іншої картки
+          if (needsRefresh()) refresh();   // набір рахунків змінився — довантажити виписки
         },
       }, mine ? 'Це не моя картка (напр., дитяча)' : '↩ Рахувати як мою'));
     }

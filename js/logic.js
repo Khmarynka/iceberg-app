@@ -92,15 +92,29 @@ export function classify(item, markers) {
   return 'spend';
 }
 
-export function toOps(items, info) {
+export function toOps(items, info, acc = null) {
   const mk = ownMarkers(info);
   return items
     .map(i => ({
-      id: i.id, time: +i.time || 0, amount: +i.amount || 0,
-      desc: (i.description || '').trim(), mcc: +i.mcc || 0,
+      id: (acc ? acc + ':' : '') + i.id, time: +i.time || 0, amount: +i.amount || 0,
+      desc: (i.description || '').trim(), mcc: +i.mcc || 0, acc,
       kind: classify(i, mk), balance: i.balance, cashback: i.cashbackAmount || 0,
     }))
     .sort((a, b) => b.time - a.time);
+}
+
+/** Операції з усіх рахунків: byAcc = { accountId: [items] }. */
+export function allOps(byAcc, info) {
+  return Object.entries(byAcc || {})
+    .flatMap(([acc, items]) => toOps(items || [], info, acc))
+    .sort((a, b) => b.time - a.time);
+}
+
+/** Гривневі рахунки, з яких беремо виписку: усі, крім «не моїх»; основна картка — першою. */
+export function statementAccounts(info, notMine = []) {
+  const main = mainAccount(info, notMine);
+  const uah = (info.accounts || []).filter(a => a.currencyCode === 980 && !notMine.includes(a.id));
+  return main ? [main, ...uah.filter(a => a.id !== main.id)] : uah;
 }
 
 export function totals(ops) {

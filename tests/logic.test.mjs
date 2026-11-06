@@ -1,7 +1,7 @@
 // node --test tests/  — логіка на назвах з реального скріншота власника.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { money, monthStartUnix, kyivDate, classify, ownMarkers, toOps, totals, ownMoney, mainAccount, cardName, category } from '../js/logic.js';
+import { allOps, statementAccounts, money, monthStartUnix, kyivDate, classify, ownMarkers, toOps, totals, ownMoney, mainAccount, cardName, category } from '../js/logic.js';
 
 const INFO = {
   accounts: [
@@ -107,4 +107,29 @@ test('main card skips child card even if listed first', () => {
   assert.equal(mainAccount(info).id, 'mine');            // чорна з лімітом — пріоритет
   assert.equal(mainAccount(info, ['mine']).id, 'kid');
   assert.equal(mainAccount({ accounts: [info.accounts[0]] }, ['kid']), null);
+});
+
+test('all own accounts: FOP income -> white card -> repayment; own transfers excluded', () => {
+  const info = { accounts: [
+    { id: 'fop', iban: 'UA00FOP', currencyCode: 980, type: 'fop', balance: 0, creditLimit: 0 },
+    { id: 'white', iban: 'UA22WHITE', currencyCode: 980, type: 'white', balance: 500000, creditLimit: 0 },
+    { id: 'black', iban: 'UA11BLACK', currencyCode: 980, type: 'black', balance: 1129, creditLimit: 15000000 },
+    { id: 'kid', iban: 'UA44KID', currencyCode: 980, type: 'black', balance: 3163, creditLimit: 0 },
+  ], jars: [] };
+  assert.deepEqual(statementAccounts(info, ['kid']).map(a => a.id), ['black', 'fop', 'white']);
+  const byAcc = {
+    fop: [it(1, 3000000, 'ТОВ Філіпс Юкрейн', 4829, { counterIban: 'UA77PHILIPS' }),
+          it(2, -3000000, 'На білу картку', 4829, { counterIban: 'UA22WHITE' })],
+    white: [it(3, 3000000, 'З рахунку ФОП', 4829, { counterIban: 'UA00FOP' }),
+            it(4, -2500000, 'Погашення наступного платежу', 0)],
+    black: [],
+  };
+  const ops = allOps(byAcc, info);
+  assert.equal(ops.length, 4);
+  assert.ok(new Set(ops.map(o => o.id)).size === 4);          // id унікальні між рахунками
+  const t = totals(ops);
+  assert.equal(t.income, 3000000);                            // зарплата — один раз, не двічі
+  assert.equal(t.credit, 2500000);
+  assert.equal(t.ownIn + t.ownOut, 6000000);                  // ФОП→біла видно, але не рахується
+  assert.equal(ops.find(o => o.desc === 'ТОВ Філіпс Юкрейн').acc, 'fop');
 });

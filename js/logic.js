@@ -86,6 +86,9 @@ export function ownMarkers(info) {
 // Перекази й готівка: такі MCC у надходженнях — справжній прихід; інші MCC у плюсі — повернення від магазину.
 const TRANSFER_MCC = new Set([0, 4829, 6010, 6011, 6012, 6536, 6537, 6538, 6540]);
 const REFUND_WORDS = ['повернення', 'скасування', 'відміна', 'refund', 'cancel', 'reversal'];
+// Видача кредиту на картку: це борг, а не дохід.
+const BORROW_WORDS = ['кредит готівкою', 'видача кредиту', 'видача позики', 'позика', 'кредитні кошти', 'кредит на картку',
+  'зарахування кредиту', 'кредит від', 'cash loan', 'loan'];
 
 export function classify(item, markers) {
   const desc = (item.description || '').toLowerCase().trim();
@@ -94,6 +97,7 @@ export function classify(item, markers) {
   if (OWN_RE.test(desc) || markers.jars.some(j => j && desc.includes(j))) return 'own';
   if (markers.name && markers.name.length >= 2 && markers.name.every(w => desc.includes(w))) return 'own';
   if (amt > 0) {
+    if (BORROW_WORDS.some(w => desc.includes(w))) return 'borrow';
     if (REFUND_WORDS.some(w => desc.includes(w)) || !TRANSFER_MCC.has(+item.mcc || 0)) return 'refund';
     return 'income';
   }
@@ -114,11 +118,37 @@ export function toOps(items, info, acc = null) {
 }
 
 /** Операції з усіх рахунків: byAcc = { accountId: [items] }. */
-export function allOps(byAcc, info) {
+/** overrides — { opId: kind }: що користувач вказав вручну (має пріоритет над автоматикою). */
+export function allOps(byAcc, info, overrides = {}) {
   const ops = Object.entries(byAcc || {})
     .flatMap(([acc, items]) => toOps(items || [], info, acc))
     .sort((a, b) => b.time - a.time);
+  for (const o of ops) if (overrides[o.id]) { o.kind = overrides[o.id]; o.manual = true; }
   pairOwnTransfers(ops);
+  pairLoans(ops);
+  return ops;
+}
+
+/**
+ * Кредит: видача (borrow) і пізніше погашення (credit) суми ≥ видачі і ≤ видачі +50% протягом 62 днів →
+ * погашення стає «repay»: тіло боргу не витрата, різниця — відсотки (interest).
+ */
+export function pairLoans(ops, maxDays = 62) {
+  const used = new Set();
+  const byTime = [...ops].sort((a, b) => a.time - b.time);
+  for (const b of byTime) {
+    if (b.kind !== 'borrow') continue;
+    const r = byTime.find(o => !used.has(o.id) && o.kind === 'credit' && o.time > b.time &&
+      o.time - b.time <= maxDays * 86400 && -o.amount >= b.amount && -o.amount <= b.amount * 1.5);
+    if (r) {
+      used.add(r.id);
+      r.kind = 'repay';
+      r.principal = b.amount;
+      r.interest = -r.amount - b.amount;
+      r.days = Math.max(1, Math.round((r.time - b.time) / 86400));
+      b.repaidBy = r.id;
+    }
+  }
   return ops;
 }
 
@@ -126,8 +156,8 @@ export function allOps(byAcc, info) {
 export function pairOwnTransfers(ops, windowSec = 600) {
   const used = new Set();
   for (const out of ops) {
-    if (out.amount >= 0 || out.kind === 'own' || used.has(out.id)) continue;
-    const match = ops.find(o => !used.has(o.id) && o.acc && out.acc && o.acc !== out.acc &&
+    if (out.amount >= 0 || out.kind === 'own' || out.manual || used.has(out.id)) continue;
+    const match = ops.find(o => !used.has(o.id) && !o.manual && o.acc && out.acc && o.acc !== out.acc &&
       o.amount === -out.amount && Math.abs(o.time - out.time) <= windowSec);
     if (match) {
       out.kind = 'own'; match.kind = 'own';
@@ -145,12 +175,14 @@ export function statementAccounts(info, notMine = []) {
 }
 
 export function totals(ops) {
-  const t = { income: 0, spend: 0, credit: 0, fee: 0, ownIn: 0, ownOut: 0, refund: 0, byCat: {} };
+  const t = { income: 0, spend: 0, credit: 0, fee: 0, ownIn: 0, ownOut: 0, refund: 0, borrowed: 0, repaid: 0, interest: 0, byCat: {} };
   for (const o of ops) {
     const a = o.amount;
     if (o.kind === 'income') t.income += a;
     else if (o.kind === 'own') { if (a > 0) t.ownIn += a; else t.ownOut -= a; }
     else if (o.kind === 'credit') t.credit -= a;
+    else if (o.kind === 'borrow') t.borrowed += a;
+    else if (o.kind === 'repay') { t.repaid += o.principal; t.interest += o.interest; }
     else if (o.kind === 'fee') t.fee -= a;
     else if (o.kind === 'spend' || o.kind === 'refund') {
       // повернення від магазину зменшує витрати своєї категорії, а не збільшує прихід
@@ -162,7 +194,7 @@ export function totals(ops) {
   }
   t.spend = Math.max(0, t.spend);
   for (const c of Object.keys(t.byCat)) if (t.byCat[c] <= 0) delete t.byCat[c];
-  t.out = t.spend + t.credit + t.fee;
+  t.out = t.spend + t.credit + t.fee + t.interest;
   t.net = t.income - t.out;
   return t;
 }

@@ -9,12 +9,12 @@ import {
   cardName, CURRENCY, allOps, statementAccounts,
 } from './logic.js';
 
-export const VERSION = '0.2.3';
+export const VERSION = '0.2.5';
 const CACHE_FRESH_MS = 60 * 60 * 1000;   // дані вважаються свіжими 60 хв
 const AUTOLOCK_MS = 5 * 60 * 1000;       // блокування після 5 хв у фоні
 
 const app = document.getElementById('app');
-const S = { vault: null, token: null, cache: null, prefs: { notMine: [] }, plan: P.emptyPlan(), cal: null, day: null, edit: null, aikey: null, queue: [], tab: 'overview', filter: 'all', open: null, status: null, busy: false };
+const S = { vault: null, token: null, cache: null, prefs: { notMine: [], kinds: {} }, plan: P.emptyPlan(), cal: null, day: null, edit: null, aikey: null, queue: [], tab: 'overview', filter: 'all', open: null, status: null, busy: false };
 
 // ---------------------------------------------------------------- DOM без innerHTML (захист від XSS)
 function h(tag, attrs = {}, ...kids) {
@@ -46,7 +46,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 function lock() {
-  Object.assign(S, { vault: null, token: null, cache: null, prefs: { notMine: [] }, plan: P.emptyPlan(), cal: null, day: null, edit: null, aikey: null, queue: [], open: null, status: null, tab: 'overview', filter: 'all' });
+  Object.assign(S, { vault: null, token: null, cache: null, prefs: { notMine: [], kinds: {} }, plan: P.emptyPlan(), cal: null, day: null, edit: null, aikey: null, queue: [], open: null, status: null, tab: 'overview', filter: 'all' });
   viewUnlock();
 }
 
@@ -99,7 +99,7 @@ async function viewUnlock() {
     S.vault = v;
     S.token = await v.get('token');
     S.cache = await v.get('cache');
-    S.prefs = Object.assign({ notMine: [] }, await v.get('prefs'));
+    S.prefs = Object.assign({ notMine: [], kinds: {} }, await v.get('prefs'));
     S.plan = Object.assign(P.emptyPlan(), await v.get('plan'));
     S.aikey = await v.get('aikey');
     S.token ? afterUnlock() : viewToken();
@@ -248,7 +248,7 @@ function header(title) {
 
 function monthOps() {
   const c = S.cache;
-  return c && c.byAcc ? allOps(c.byAcc, c.info || {}) : [];
+  return c && c.byAcc ? allOps(c.byAcc, c.info || {}, S.prefs.kinds || {}) : [];
 }
 
 // ---------------------------------------------------------------- Огляд
@@ -282,13 +282,15 @@ function viewOverview() {
       h('div', {}, h('div', { class: 'lbl' }, h('span', {}, '⬇ Прийшло'), h('b', { class: 'num c-in' }, money(t.income))),
         bar([[t.income, 'in']], scale)),
       h('div', {}, h('div', { class: 'lbl' }, h('span', {}, '⬆ Пішло'), h('b', { class: 'num c-out' }, money(t.out))),
-        bar([[t.credit, 'oblig'], [t.spend, 'spend'], [t.fee, 'fee']], scale))),
+        bar([[t.credit, 'oblig'], [t.spend, 'spend'], [t.fee + t.interest, 'fee']], scale))),
     h('div', { class: 'legend' },
       h('span', { class: 'in' }, 'прихід'),
       h('span', { class: 'oblig' }, `погашення ${money(t.credit)}`),
       h('span', { class: 'spend' }, `покупки ${money(t.spend)}`),
       t.fee ? h('span', { class: 'fee' }, `штрафи банку ${money(t.fee)}`) : null,
-      t.refund ? h('span', { class: 'own' }, `повернення ${money(t.refund)} (вже відняті з покупок)`) : null),
+      t.refund ? h('span', { class: 'own' }, `повернення ${money(t.refund)} (вже відняті з покупок)`) : null,
+      t.interest ? h('span', { class: 'fee' }, `відсотки за кредит ${money(t.interest, 980, { kop: true })}`) : null),
+    t.borrowed ? h('p', { class: 'muted small' }, `Взято в борг ${money(t.borrowed)}${t.repaid ? `, повернуто ${money(t.repaid)}` : ''} — це не дохід і не витрата; рахую лише відсотки.`) : null,
     h('div', { class: 'net ' + (t.net >= 0 ? 'pos' : 'neg') },
       h('span', {}, t.net >= 0 ? 'Прийшло більше, ніж пішло' : 'Пішло більше, ніж прийшло'),
       h('span', { class: 'num' }, money(t.net, 980, { sign: true }))),
@@ -326,15 +328,17 @@ const KIND = {
   income: ['↓', 'Прихід'], spend: ['↑', 'Покупка'], credit: ['🔒', 'Обовʼязкове: погашення'],
   fee: ['!', 'Штраф чи комісія банку'], own: ['⇄', 'Між своїми рахунками'],
   refund: ['↩', 'Повернення від магазину (зменшує витрати)'],
+  borrow: ['₴', 'Взято в борг (кредит) — не дохід'],
+  repay: ['✓', 'Повернення кредиту'],
 };
-const FILTERS = [['all', 'Усі'], ['income', 'Прихід'], ['spend', 'Покупки'], ['credit', 'Обовʼязкові'], ['fee', 'Штрафи'], ['own', 'Свої перекази'], ['refund', 'Повернення']];
+const FILTERS = [['all', 'Усі'], ['income', 'Прихід'], ['spend', 'Покупки'], ['credit', 'Обовʼязкові'], ['fee', 'Штрафи'], ['own', 'Свої перекази'], ['refund', 'Повернення'], ['borrow', 'Кредити']];
 
 function viewOps() {
   const ops = monthOps();
-  const shown = S.filter === 'all' ? ops : ops.filter(o => o.kind === S.filter);
+  const shown = S.filter === 'all' ? ops : ops.filter(o => o.kind === S.filter || (S.filter === 'borrow' && o.kind === 'repay'));
   const chips = h('div', { class: 'chips', role: 'group', 'aria-label': 'Фільтр' },
     FILTERS.map(([id, name]) => {
-      const n = id === 'all' ? ops.length : ops.filter(o => o.kind === id).length;
+      const n = id === 'all' ? ops.length : ops.filter(o => o.kind === id || (id === 'borrow' && o.kind === 'repay')).length;
       return n || id === 'all' ? h('button', {
         class: 'chip', type: 'button', 'aria-pressed': String(S.filter === id),
         onclick: () => { S.filter = id; S.open = null; render(); },
@@ -360,6 +364,28 @@ function viewOps() {
     h('p', { class: 'muted small' }, 'Торкнись операції, щоб побачити деталі.'));
 }
 
+function kindFixer(o) {
+  const choices = o.amount > 0
+    ? [['income', 'Дохід'], ['borrow', 'Кредит (борг)'], ['own', 'Мій переказ'], ['refund', 'Повернення від магазину']]
+    : [['spend', 'Покупка'], ['credit', 'Обовʼязкове погашення'], ['own', 'Мій переказ'], ['fee', 'Штраф/комісія']];
+  const set = async (kind) => {
+    S.prefs.kinds = S.prefs.kinds || {};
+    if (kind) S.prefs.kinds[o.id] = kind; else delete S.prefs.kinds[o.id];
+    await S.vault.set('prefs', S.prefs);
+    render();
+  };
+  return h('div', { class: 'fix' },
+    h('small', {}, o.manual ? 'Тип вказано вручну. Змінити:' : 'Неправильно визначено? Це насправді:'),
+    h('div', { class: 'chips' },
+      choices.filter(([k]) => k !== o.kind).map(([k, n]) => h('button', { class: 'chip', type: 'button', onclick: (e) => { e.stopPropagation(); set(k); } }, n)),
+      o.manual ? h('button', { class: 'chip', type: 'button', onclick: (e) => { e.stopPropagation(); set(null); } }, '↺ Як визначив застосунок') : null));
+}
+
+function loanRate(o) {
+  const perDay = o.interest / o.principal / o.days;
+  return `${(perDay * 100).toFixed(2).replace('.', ',')}% на день, ≈${Math.round(perDay * 365 * 100)}% річних`;
+}
+
 function accName(id) {
   const a = ((S.cache && S.cache.info && S.cache.info.accounts) || []).find(x => x.id === id);
   return a ? cardName(a) : '';
@@ -367,7 +393,8 @@ function accName(id) {
 
 function opRow(o) {
   const [icon, kindName] = KIND[o.kind];
-  const sub = o.kind === 'spend' ? category(o.mcc) : kindName;
+  const sub = o.kind === 'spend' ? category(o.mcc)
+    : o.kind === 'repay' ? `повернення кредиту, відсотки ${money(o.interest, 980, { kop: true })}` : kindName;
   const d = kyivDate(o.time);
   const open = S.open === o.id;
   const row = h('button', {
@@ -382,8 +409,11 @@ function opRow(o) {
     h('span', {}, `Тип: ${kindName}`),
     o.acc ? h('span', {}, `Рахунок: ${accName(o.acc)}`) : null,
     o.kind === 'spend' ? h('span', {}, `Категорія: ${category(o.mcc)} (MCC ${o.mcc})`) : null,
+    o.kind === 'repay' ? h('span', {}, `Тіло кредиту ${money(o.principal)} — не витрата. Відсотки ${money(o.interest, 980, { kop: true })} за ${o.days} дн. ≈ ${loanRate(o)}`) : null,
+    o.kind === 'borrow' ? h('span', {}, o.repaidBy ? 'Кредит уже повернуто — див. операцію повернення.' : 'Ще не бачу повернення цього кредиту у виписці.') : null,
     o.balance != null ? h('span', {}, `Баланс після: ${money(o.balance)}`) : null,
-    o.cashback ? h('span', {}, `Кешбек: ${money(o.cashback)}`) : null)];
+    o.cashback ? h('span', {}, `Кешбек: ${money(o.cashback)}`) : null,
+    kindFixer(o))];
 }
 
 // ---------------------------------------------------------------- Рахунки

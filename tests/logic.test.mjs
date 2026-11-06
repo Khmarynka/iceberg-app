@@ -171,3 +171,44 @@ test('relative with same surname is not "own"', () => {
   const ops = allOps({ x: [{ id: '1', time: 1, amount: 50000, description: 'Сербіненко Олександр', mcc: 4829 }] }, info);
   assert.equal(ops[0].kind, 'income');
 });
+
+test('owner case: cash loan 10 000 → vaccination, Claude Max → repay 10 060 = 60 interest', () => {
+  const info = { name: 'Сербіненко Євгеній', accounts: [
+    { id: 'white', iban: 'UA22WHITE', currencyCode: 980, type: 'white', balance: 0, creditLimit: 0 },
+  ], jars: [] };
+  const T = 1793700000;
+  const ops = allOps({ white: [
+    { id: '1', time: T, amount: 1000000, description: 'Кредит готівкою', mcc: 0 },
+    { id: '2', time: T + 3600, amount: -431500, description: 'Медичний центр Добробут', mcc: 8062 },
+    { id: '3', time: T + 7200, amount: -497000, description: 'CLAUDE.AI SUBSCRIPTION', mcc: 5817 },
+    { id: '4', time: T + 2 * 86400, amount: -1006000, description: 'Погашення кредиту готівкою', mcc: 0 },
+  ] }, info);
+  const k = Object.fromEntries(ops.map(o => [o.id.split(':')[1], o.kind]));
+  assert.deepEqual(k, { 1: 'borrow', 2: 'spend', 3: 'spend', 4: 'repay' });
+  const r = ops.find(o => o.kind === 'repay');
+  assert.deepEqual([r.principal, r.interest, r.days], [1000000, 6000, 2]);
+  const t = totals(ops);
+  assert.equal(t.income, 0);                   // кредит — не дохід
+  assert.equal(t.credit, 0);                   // тіло кредиту — не витрата
+  assert.equal(t.interest, 6000);              // 60 грн відсотків
+  assert.equal(t.out, 431500 + 497000 + 6000);
+  assert.equal(t.borrowed, 1000000);
+});
+
+test('loan not yet repaid stays as borrow; unrelated repayment stays credit', () => {
+  const ops = allOps({ w: [
+    { id: 'a', time: 100, amount: 500000, description: 'Кредит готівкою', mcc: 0 },
+    { id: 'b', time: 200, amount: -106600, description: 'Погашення наступного платежу', mcc: 0 },
+  ] }, { accounts: [], jars: [] });
+  assert.deepEqual(ops.map(o => o.kind).sort(), ['borrow', 'credit']);
+});
+
+test('manual override wins and feeds loan pairing', () => {
+  const ops = allOps({ w: [
+    { id: 'a', time: 100, amount: 1000000, description: 'Зарахування коштів', mcc: 0 },   // невідомий опис видачі
+    { id: 'b', time: 200000, amount: -1006000, description: 'Погашення', mcc: 0 },
+  ] }, { accounts: [], jars: [] }, { 'w:a': 'borrow' });
+  const k = Object.fromEntries(ops.map(o => [o.id, o.kind]));
+  assert.deepEqual(k, { 'w:a': 'borrow', 'w:b': 'repay' });
+  assert.equal(totals(ops).interest, 6000);
+});

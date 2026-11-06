@@ -231,3 +231,9 @@ label small { font-size: 12.5px; }
 .hero-img { width: min(56vw, 240px); height: auto; aspect-ratio: 1; border-radius: 22%; box-shadow: 0 12px 40px rgba(0, 60, 160, 0.35); }
 .brand-name { font-size: 30px; font-weight: 800; letter-spacing: -0.02em; margin-top: 14px; }
 .brand-tag { font-size: 15px; color: var(--accent); letter-spacing: 0.12em; text-transform: uppercase; font-weight: 600; }
+
+.k-borrow .ic { background: var(--fee-soft); color: var(--fee); } .k-borrow .a { color: var(--fee); }
+.k-repay .ic { background: var(--own-soft); color: var(--own); } .k-repay .a { color: var(--own); }
+
+.fix { display: grid; gap: 6px; margin-top: 6px; }
+.fix .chip { font-size: 13px; padding: 6px 11px; }

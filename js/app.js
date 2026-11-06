@@ -9,7 +9,7 @@ import {
   cardName, CURRENCY, allOps, statementAccounts,
 } from './logic.js';
 
-export const VERSION = '0.2.5';
+export const VERSION = '0.2.6';
 const CACHE_FRESH_MS = 60 * 60 * 1000;   // дані вважаються свіжими 60 хв
 const AUTOLOCK_MS = 5 * 60 * 1000;       // блокування після 5 хв у фоні
 

@@ -212,3 +212,13 @@ test('manual override wins and feeds loan pairing', () => {
   assert.deepEqual(k, { 'w:a': 'borrow', 'w:b': 'repay' });
   assert.equal(totals(ops).interest, 6000);
 });
+
+test('installment payout to card is debt; interest-only payment is a cost', () => {
+  const ops = allOps({ w: [
+    { id: 'a', time: 100, amount: 2000000, description: 'Розстрочка на картку', mcc: 0 },
+    { id: 'b', time: 200, amount: -9000, description: 'Сплата відсотків за кредитом готівкою', mcc: 0 },
+  ] }, { accounts: [], jars: [] });
+  const k = Object.fromEntries(ops.map(o => [o.id, o.kind]));
+  assert.deepEqual(k, { 'w:a': 'borrow', 'w:b': 'fee' });
+  assert.equal(totals(ops).income, 0);
+});
